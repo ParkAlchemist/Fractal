@@ -4,8 +4,8 @@ from PIL import Image
 @dataclass
 class Viewport:
     image: Image.Image
-    center: complex
     width: float
+    center: complex = 0 + 0j
 
     @property
     def height(self):

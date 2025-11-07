@@ -1,27 +1,8 @@
-from scipy.interpolate import interp1d
 import numpy as np
-
+from scipy.interpolate import interp1d
 
 def denormalize(palette):
-    return [
-        tuple(int(channel*255) for channel in color)
-        for color in palette
-    ]
-
-
-def make_gradient(colors, interpolation="linear"):
-    X = [i / (len(colors) - 1) for i in range(len(colors))]
-    Y = [[color[i] for color in colors] for i in range(3)]
-    channels = [interp1d(X, y, kind=interpolation) for y in Y]
-    return lambda x: [np.clip(channel(x), 0, 1) for channel in channels]
-
-
-def create_smooth_gradient(palette, resolution=1000):
-    indices = np.linspace(0, len(palette) - 1, len(palette))
-    interp_func = interp1d(indices, palette, kind='cubic', axis=0, fill_value="extrapolate")
-    smooth_gradient = interp_func(np.linspace(0, len(palette) - 1, resolution))
-    return smooth_gradient.astype(int)
-
+    return [tuple(int(channel * 255) for channel in color) for color in palette]
 
 def edge():
     exterior = [(1, 1, 1)] * 50
@@ -29,35 +10,35 @@ def edge():
     gray_area = [(1 - i / 44,) * 3 for i in range(45)]
     return denormalize(exterior + gray_area + interior)
 
-
-def gen_gradient(colors):
-    grad = []
-    for i in range(1, len(colors)):
-        j = i - 1
-        temp = get_color_gradient(list(colors[j]), list(colors[i]), 16)
-        for val in temp:
-            grad.append(hex_to_RGB(val))
-    return grad
-
-
-def hex_to_RGB(hex_str):
-    """ #FFFFFF -> [255,255,255]"""
-    #Pass 16 to the integer function for change of base
-    return [int(hex_str[i:i+2], 16) for i in range(1,6,2)]
-
-
-def rgb_to_hex(rgb):
-    return '#{:02x}{:02x}{:02x}'.format(rgb[0], rgb[1], rgb[2])
-
-
-def get_color_gradient(c1, c2, n):
+def create_smooth_gradient(palette, resolution=1000, interpolation='cubic'):
     """
-    Given two hex colors, returns a color gradient
-    with n colors.
+    Generates a smooth gradient from a list of RGB tuples using interpolation.
+    Returns a list of RGB tuples.
     """
-    assert n > 1
-    c1_rgb = np.array(c1)/255
-    c2_rgb = np.array(c2)/255
-    mix_pcts = [x/(n-1) for x in range(n)]
-    rgb_colors = [((1-mix)*c1_rgb + (mix*c2_rgb)) for mix in mix_pcts]
-    return ["#" + "".join([format(int(round(val*255)), "02x") for val in item]) for item in rgb_colors]
+    palette = np.array(palette)
+    indices = np.linspace(0, len(palette) - 1, len(palette))
+    interp_func = interp1d(indices, palette, kind=interpolation, axis=0, fill_value="extrapolate")
+    smooth_gradient = interp_func(np.linspace(0, len(palette) - 1, resolution))
+    return [tuple(map(int, np.clip(color, 0, 255))) for color in smooth_gradient]
+
+# Define base palettes
+base_palettes = {
+    "Classic": [(0, 0, 0), (66, 30, 15), (25, 7, 26), (9, 1, 47),
+                (4, 4, 73), (0, 7, 100), (12, 44, 138),
+                (24, 82, 177), (57, 125, 209), (134, 181, 229),
+                (211, 236, 248), (241, 233, 191), (248, 201, 95),
+                (255, 170, 0), (204, 128, 0), (153, 87, 0), (106, 52, 3)],
+    "Fire": [(0, 0, 0), (255, 0, 0), (255, 85, 0), (255, 170, 0),
+             (255, 255, 0), (255, 255, 85), (255, 255, 170)],
+    "Ocean": [(0, 0, 0), (0, 32, 64), (0, 64, 128), (0, 96, 192),
+              (0, 128, 255), (64, 160, 255), (128, 192, 255)],
+    "Smooth": create_smooth_gradient([(0, 0, 0), (66, 30, 15), (25, 7, 26), (9, 1, 47),
+                                      (4, 4, 73), (0, 7, 100), (12, 44, 138),
+                                      (24, 82, 177), (57, 125, 209), (134, 181, 229),
+                                      (211, 236, 248), (241, 233, 191), (248, 201, 95),
+                                      (255, 170, 0), (204, 128, 0), (153, 87, 0), (106, 52, 3)]),
+    "Edge": edge()
+}
+
+# Export palettes dictionary
+palettes = base_palettes

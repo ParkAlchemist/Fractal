@@ -1,30 +1,6 @@
 import numpy as np
 from scipy.interpolate import interp1d
-from scipy.ndimage import sobel
 
-def denormalize(palette):
-    return [tuple(int(channel * 255) for channel in color) for color in palette]
-
-def edge(resolution=64):
-    # Create a synthetic grayscale gradient image
-    gradient = np.tile(np.linspace(0, 255, resolution),
-                       (resolution, 1)).astype(np.float32)
-
-    # Apply Sobel filter to detect edges
-    dx = sobel(gradient, axis=1)
-    dy = sobel(gradient, axis=0)
-    magnitude = np.hypot(dx, dy)
-
-    # Normalize and enhance contrast
-    magnitude = (magnitude - magnitude.min()) / (
-                magnitude.max() - magnitude.min() + 1e-5)
-    magnitude = np.clip(magnitude * 2.5, 0,
-                        1)  # Boost contrast for clearer outline
-
-    # Extract a 1D slice for palette
-    edge_line = magnitude[resolution // 2]
-    palette = [(int(val * 255),) * 3 for val in edge_line]
-    return palette
 
 def apply_gamma_correction(palette, gamma=0.8):
     """
@@ -102,8 +78,6 @@ base_palettes = {
         (0, 7, 100), (12, 44, 138), (24, 82, 177), (57, 125, 209),
         (134, 181, 229), (211, 236, 248), (241, 233, 191), (248, 201, 95),
         (255, 170, 0), (204, 128, 0), (153, 87, 0), (106, 52, 3)]),
-
-    "Edge": create_smooth_gradient(edge()),
 
     "NeonGlow": create_smooth_gradient([
         (0, 0, 0),

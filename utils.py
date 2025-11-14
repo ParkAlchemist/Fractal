@@ -1,3 +1,6 @@
+import os
+
+
 def fractal_to_image_coords(fx, fy, center_x, center_y, zoom, image_width, image_height):
     """
     Convert fractal coordinates to pixel coordinates in the rendered image.
@@ -102,3 +105,18 @@ def fractal_to_viewport_coords(fx, fy, center_x, center_y, zoom, viewport_width,
     vx = int((fx - center_x) * zoom + viewport_width / 2)
     vy = int((fy - center_y) * zoom + viewport_height / 2)
     return vx, vy
+
+def clear_cache_lock():
+    # --- Automatically remove stale PyOpenCL cache lock ---
+    cache_dir = os.path.join(
+        os.environ.get("LOCALAPPDATA", os.path.expanduser("~\\AppData\\Local")),
+        "pyopencl", "pyopencl", "Cache",
+        "pyopencl-compiler-cache-v2-py3.13.9.final.0"
+    )
+    lock_file = os.path.join(cache_dir, "lock")
+    if os.path.exists(lock_file):
+        try:
+            os.remove(lock_file)
+            print(f"Removed stale PyOpenCL cache lock: {lock_file}")
+        except PermissionError:
+            print(f"Could not remove PyOpenCL cache lock: {lock_file}, check permissions.")

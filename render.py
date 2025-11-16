@@ -1,6 +1,6 @@
-import numpy as np
 from PyQt5.QtCore import pyqtSignal, QObject, QThread
 from PyQt5.QtGui import QImage
+
 from fractal import Mandelbrot
 
 
@@ -48,7 +48,7 @@ class FullImageRenderer(QObject):
     """Simple full-frame Mandelbrot renderer (single pass only)."""
     image_updated = pyqtSignal(QImage)
 
-    def __init__(self, width, height, palette, kernel="opencl", max_iter=1000, samples=2):
+    def __init__(self, width, height, palette, kernel="auto", max_iter=1000, samples=2):
         super().__init__()
         self.width = width
         self.height = height
@@ -60,7 +60,7 @@ class FullImageRenderer(QObject):
         # Create Mandelbrot instance for full frame
         self.mandelbrot = Mandelbrot(palette, kernel=kernel,
                                      img_width=width, img_height=height,
-                                     max_iter=max_iter)
+                                     max_iter=max_iter, enable_timing=True)
 
         # Worker thread
         self._worker = None
@@ -80,7 +80,6 @@ class FullImageRenderer(QObject):
         )
         self._worker.image_rendered.connect(self.image_updated.emit)
         self._worker.start()
-        self._worker.wait()  # Wait for completion before returning
 
     def stop(self):
         if self._worker is not None:
@@ -91,3 +90,8 @@ class FullImageRenderer(QObject):
         """Update the palette for Mandelbrot instance."""
         self.palette = palette
         self.mandelbrot.change_palette(palette)
+
+    def set_image_size(self, width, height):
+        self.width = width
+        self.height = height
+        self.mandelbrot.change_image_size(width, height)

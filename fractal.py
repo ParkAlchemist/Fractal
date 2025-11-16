@@ -231,8 +231,7 @@ def mandelbrot_kernel_cpu(real_grid, imag_grid, width, height, max_iter, samples
 # --------------------------------------------------------
 class Mandelbrot:
     def __init__(self, palette, kernel="auto", img_width=800, img_height=600,
-                 max_iter=1000, precision="float32", threads_per_block=(16, 16),
-                 enable_timing=False):
+                 max_iter=1000, precision="float32", enable_timing=False):
 
         self.palette = np.array(palette, dtype=np.uint8).reshape(-1, 3).flatten()
         self.width = img_width
@@ -241,19 +240,20 @@ class Mandelbrot:
         self.precision = np.float32 if precision == "float32" else np.float64
         self.enable_timing = enable_timing
 
-        # Auto fall-back logic
+        # Detect available backends
+        available_backends = []
+        if cuda.is_available():
+            available_backends.append("cuda")
+        try:
+            if cl.get_platforms():
+                available_backends.append("opencl")
+        except RuntimeError:
+            pass
+        available_backends.append("cpu")
+
+        # Auto mode: benchmark all backends
         if kernel == "auto":
-            if cuda.is_available():
-                self.kernel = "cuda"
-            else:
-                try:
-                    platforms = cl.get_platforms()
-                    if platforms:
-                        self.kernel = "opencl"
-                    else:
-                        self.kernel = "cpu"
-                except RuntimeError:
-                    self.kernel = "cpu"
+            self.kernel = self._benchmark_backends(available_backends)
         else:
             self.kernel = kernel.lower()
 
@@ -263,13 +263,78 @@ class Mandelbrot:
             self.render = self._render_opencl
             print("Using OpenCL backend.")
         elif self.kernel == "cuda":
-            self._init_cuda(threads_per_block)
+            self._init_cuda()
             self.render = self._render_cuda
             print("Using CUDA backend.")
         elif self.kernel == "cpu":
             self.render = self._render_cpu
+            print("Using CPU backend.")
         else:
             raise ValueError("Kernel must be 'opencl', 'cuda' or 'cpu'.")
+
+
+    # ---------------- Benchmark Backends ----------------
+    def _benchmark_backends(self, backends):
+        print("Benchmarking backends...")
+        test_min_x, test_max_x = -2.0, 1.0
+        test_min_y, test_max_y = -1.5, 1.5
+        test_width, test_height = 256, 256
+        palette = self.palette
+
+        timings = {}
+        for backend in backends:
+            if backend == "cuda":
+                try:
+                    self._init_cuda()
+                    start = time.time()
+                    mandelbrot_kernel_cuda[self.blocks_per_grid, self.threads_per_block](
+                        self.precision(test_min_x), self.precision(test_max_x),
+                        self.precision(test_min_y), self.precision(test_max_y),
+                        self.image_gpu, np.int32(100),
+                        self.palette_device, np.int32(1)
+                    )
+                    cuda.synchronize()
+                    timings[backend] = time.time() - start
+                except Exception:
+                    timings[backend] = float('inf')
+
+            elif backend == "opencl":
+                try:
+                    self._init_opencl()
+                    start = time.time()
+                    self.program.mandelbrot_kernel(self.queue,
+                                                   (test_width, test_height),
+                                                   None,
+                                                   self.precision(test_min_x),
+                                                   self.precision(test_max_x),
+                                                   self.precision(test_min_y),
+                                                   self.precision(test_max_y),
+                                                   self.image_buf,
+                                                   np.int32(test_width),
+                                                   np.int32(test_height),
+                                                   np.int32(100),
+                                                   self.palette_buf,
+                                                   np.int32(1))
+                    cl.enqueue_copy(self.queue, self.image_np, self.image_buf)
+                    self.queue.finish()
+                    timings[backend] = time.time() - start
+                except Exception:
+                    timings[backend] = float('inf')
+
+            else:  # CPU
+                start = time.time()
+                real = np.linspace(test_min_x, test_max_x, test_width,
+                                   dtype=self.precision)
+                imag = np.linspace(test_min_y, test_max_y, test_height,
+                                   dtype=self.precision)
+                real_grid, imag_grid = np.meshgrid(real, imag)
+                mandelbrot_kernel_cpu(real_grid, imag_grid, test_width,
+                                      test_height, 100, 1, palette)
+                timings[backend] = time.time() - start
+
+        best_backend = min(timings, key=timings.get)
+        print(f"Benchmark results: {timings}, chosen: {best_backend}")
+        return best_backend
 
     # ---------------- INIT OPENCL ----------------
     def _init_opencl(self):
@@ -320,18 +385,31 @@ class Mandelbrot:
         self.program = cl.Program(self.context, mandelbrot_kernel_cl).build()
 
     # ---------------- INIT CUDA ----------------
-    def _init_cuda(self, threads_per_block):
+    def _init_cuda(self):
         if not cuda.is_available():
             raise RuntimeError("CUDA not available on this system.")
 
         self.image_gpu = cuda.device_array((self.height, self.width, 3),
                                            dtype=np.uint8)
         self.palette_device = cuda.to_device(self.palette)
-        self.threads_per_block = threads_per_block
+
+        # Auto-tune threads per block
+        try:
+            min_grid_size, block_size = cuda.occupancy_max_potential_block_size(mandelbrot_kernel_cuda)
+            if block_size > 0:
+                side = int(math.sqrt(block_size))
+                self.threads_per_block = (side, side)
+            else:
+                self.threads_per_block = (16, 16)
+        except RuntimeError:
+            self.threads_per_block = (16, 16)
+
         self.blocks_per_grid = (
-            (self.width + threads_per_block[0] - 1) // threads_per_block[0],
-            (self.height + threads_per_block[1] - 1) // threads_per_block[1]
+            (self.width + self.threads_per_block[0] - 1) // self.threads_per_block[0],
+            (self.height + self.threads_per_block[1] - 1) // self.threads_per_block[1]
         )
+
+        print(f"CUDA block size: {self.threads_per_block}, grid size: {self.blocks_per_grid}")
 
     # ---------------- CUDA RENDER ----------------
     def _render_cuda(self, min_x, max_x, min_y, max_y, samples=2):
@@ -390,8 +468,7 @@ class Mandelbrot:
 
     # ---------------- PALETTE UPDATE ----------------
     def change_palette(self, palette):
-        self.palette = np.array(palette, dtype=np.uint8).reshape(-1,
-                                                                 3).flatten()
+        self.palette = np.array(palette, dtype=np.uint8).reshape(-1, 3).flatten()
         if self.kernel == "opencl":
             self.palette_buf = cl.Buffer(self.context,
                                          cl.mem_flags.READ_ONLY | cl.mem_flags.COPY_HOST_PTR,
@@ -399,12 +476,42 @@ class Mandelbrot:
         elif self.kernel == "cuda":
             self.palette_device = cuda.to_device(self.palette)
 
+    # ------------ IMAGE SIZE UPDATE ---------------
+    def change_image_size(self, width, height):
+        self.width = width
+        self.height = height
+
+        if self.kernel == "opencl":
+            self.image_np = np.zeros(self.width * self.height * 3,
+                                     dtype=np.uint8)
+            self.image_buf = cl.Buffer(self.context,
+                                       cl.mem_flags.WRITE_ONLY | cl.mem_flags.COPY_HOST_PTR,
+                                       self.image_np.nbytes,
+                                       hostbuf=self.image_np)
+        elif self.kernel == "cuda":
+            self.image_gpu = cuda.device_array((self.height, self.width, 3),
+                                               dtype=np.uint8)
+            # Auto-tune threads per block
+            try:
+                min_grid_size, block_size = cuda.occupancy_max_potential_block_size(
+                    mandelbrot_kernel_cuda)
+                if block_size > 0:
+                    side = int(math.sqrt(block_size))
+                    self.threads_per_block = (side, side)
+                else:
+                    self.threads_per_block = (16, 16)
+            except RuntimeError:
+                self.threads_per_block = (16, 16)
+
+            print(
+                f"CUDA block size: {self.threads_per_block}, grid size: {self.blocks_per_grid}")
+
     # ---------------- CLEANUP ----------------
     def close(self):
-        if self.kernel == "opencl":
+        if self.image_buf:
             self.image_buf.release()
+        if self.palette_buf:
             self.palette_buf.release()
-        # CUDA cleanup handled by Numba automatically
 
     def __enter__(self):
         return self

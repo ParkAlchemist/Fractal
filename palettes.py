@@ -37,7 +37,7 @@ def stretch_contrast(palette):
     stretched = (arr - min_vals) / (max_vals - min_vals + 1e-5) * 255
     return [tuple(map(int, np.clip(color, 0, 255))) for color in stretched]
 
-def create_smooth_gradient(palette, resolution=64, interpolation='cubic'):
+def create_smooth_gradient(palette, resolution=256, interpolation='cubic'):
     """
     Generates a smooth gradient from a list of RGB tuples using interpolation.
 

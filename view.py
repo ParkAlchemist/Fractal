@@ -1,11 +1,9 @@
 import sys
-
 from render import FullImageRenderer
 from PyQt5.QtWidgets import QApplication, QMainWindow, QLabel, QVBoxLayout, QWidget, QPushButton, QComboBox, QFileDialog, QHBoxLayout
 from PyQt5.QtGui import QImage, QPixmap
-from PyQt5.QtCore import Qt, QTimer
+from PyQt5.QtCore import Qt
 from datetime import datetime
-import math
 from palettes import palettes
 
 
@@ -23,29 +21,11 @@ class MandelbrotViewer(QMainWindow):
         self.center_y = 0.0
         self.zoom = 400.0
         self.zoom_factor = 1.5
-        self.prev_center_x = self.center_x
-        self.prev_center_y = self.center_y
-        self.prev_zoom = self.zoom
-
-        # Zoom animation
-        self.zoom_queue = []
-        self._zoom_animation_step = 0
-        self._zoom_animation_steps = 20
-        self._zoom_animation_step_interval = 16  # ~60 FPS
-        self.zoom_mouse_x = 0.0
-        self.zoom_mouse_y = 0.0
-        self.mouse_fx = 0.0
-        self.mouse_fy = 0.0
-        self._zoom_animation_timer = QTimer()
-        self._zoom_animation_timer.timeout.connect(self._perform_zoom_step)
-        self._zoom_animation_active = False
 
         self.palette_name = "Classic"
         self.palette = palettes[self.palette_name]
 
         self.cached_image = None
-
-        # Full image renderer
         self.renderer = None
 
         self.init_ui()
@@ -87,7 +67,7 @@ class MandelbrotViewer(QMainWindow):
             if path:
                 self.cached_image.save(path)
 
-    def render_fractal(self, progressive=True):
+    def render_fractal(self):
         width = self.label.width()
         height = self.label.height()
         if width == 0 or height == 0:
@@ -96,7 +76,7 @@ class MandelbrotViewer(QMainWindow):
         # Initialize FullImageRenderer if not already
         if self.renderer is None:
             self.renderer = FullImageRenderer(
-                width, height, self.palette, kernel="opencl"
+                width, height, self.palette, kernel="auto", max_iter=1000, samples=2
             )
             self.renderer.image_updated.connect(self.update_image)
 
@@ -107,56 +87,28 @@ class MandelbrotViewer(QMainWindow):
         min_y = self.center_y - (height / 2) * scale
         max_y = self.center_y + (height / 2) * scale
 
-        self.renderer.render_frame(min_x, max_x, min_y, max_y, progressive=progressive)
+        # Single-pass render
+        self.renderer.render_frame(min_x, max_x, min_y, max_y)
 
     def update_image(self, image):
         self.cached_image = image
         self.label.setPixmap(QPixmap.fromImage(self.cached_image))
 
-    # Zoom handling
+    # Instant zoom on mouse wheel
     def wheelEvent(self, event):
         zoom_in = event.angleDelta().y() > 0
         zoom_factor = self.zoom_factor if zoom_in else (1 / self.zoom_factor)
         mouse_pos = event.pos()
-        self.zoom_queue.append((zoom_factor, mouse_pos))
-        if not self._zoom_animation_active:
-            self._start_next_zoom_animation()
 
-    def _start_next_zoom_animation(self):
-        if not self.zoom_queue:
-            return
-
-        zoom_factor, mouse_pos = self.zoom_queue.pop(0)
-        self._zoom_animation_active = True
-
-        self.prev_center_x = self.center_x
-        self.prev_center_y = self.center_y
-        self.prev_zoom = self.zoom
-
-        self.zoom_mouse_x = mouse_pos.x()
-        self.zoom_mouse_y = mouse_pos.y()
-
-        self.mouse_fx = self.center_x + (self.zoom_mouse_x - self.label.width() / 2) / self.zoom
-        self.mouse_fy = self.center_y + (self.zoom_mouse_y - self.label.height() / 2) / self.zoom
+        # Adjust center based on mouse position
+        mouse_fx = self.center_x + (mouse_pos.x() - self.label.width() / 2) / self.zoom
+        mouse_fy = self.center_y + (mouse_pos.y() - self.label.height() / 2) / self.zoom
 
         self.zoom *= zoom_factor
-        self.center_x = self.mouse_fx
-        self.center_y = self.mouse_fy
+        self.center_x = mouse_fx
+        self.center_y = mouse_fy
 
-        self._zoom_animation_step = 0
-        self._zoom_animation_timer.start(self._zoom_animation_step_interval)
-        self.render_fractal(progressive=False)
-
-    def _perform_zoom_step(self):
-        t = self._zoom_animation_step / self._zoom_animation_steps
-        eased_t = t * t * (3 - 2 * t)  # ease-in-out
-        self._zoom_animation_step += 1
-
-        if self._zoom_animation_step >= self._zoom_animation_steps:
-            self._zoom_animation_timer.stop()
-            self._zoom_animation_active = False
-            if self.zoom_queue:
-                self._start_next_zoom_animation()
+        self.render_fractal()
 
     def closeEvent(self, event):
         if self.renderer:
@@ -168,5 +120,5 @@ if __name__ == "__main__":
     app = QApplication(sys.argv)
     viewer = MandelbrotViewer()
     viewer.show()
-    viewer.render_fractal(progressive=False)
+    viewer.render_fractal()
     sys.exit(app.exec_())

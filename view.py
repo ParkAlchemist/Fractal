@@ -170,6 +170,9 @@ class MandelbrotViewer(QMainWindow):
 
     # ---------------- Zoom Animation ----------------
     def wheelEvent(self, event):
+        if not self.label.geometry().contains(event.pos()):
+            return
+
         zoom_in = event.angleDelta().y() > 0
         zoom_factor = self.zoom_factor if zoom_in else (1 / self.zoom_factor)
         mouse_pos = event.pos()
@@ -278,10 +281,11 @@ class MandelbrotViewer(QMainWindow):
     # ---------------- Panning ----------------
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
-            self.dragging = True
-            self.last_mouse_pos = event.pos()
-            self.start_center_x = self.center_x
-            self.start_center_y = self.center_y
+            if self.label.geometry().contains(event.pos()):
+                self.dragging = True
+                self.last_mouse_pos = event.pos()
+                self.start_center_x = self.center_x
+                self.start_center_y = self.center_y
 
     def mouseMoveEvent(self, event):
         if self.dragging and self.cached_image:
@@ -318,7 +322,8 @@ class MandelbrotViewer(QMainWindow):
         # Handle window resize: re-render fractal if viewport size changed
         if self.label.width() > 0 and self.label.height() > 0:
             if self.renderer is not None:
-                self.renderer.set_image_size(self.label.width(), self.label.height())
+                self.renderer.set_image_size(self.label.width(),
+                                             self.label.height())
                 self.render_fractal()
         super().resizeEvent(event)
 

@@ -88,7 +88,7 @@ __kernel void mandelbrot_kernel(
 # --------------------------------------------------------
 # ---------------------- CUDA KERNEL ---------------------
 # --------------------------------------------------------
-@cuda.jit
+@cuda.jit(fastmath=True)
 def mandelbrot_kernel_cuda(min_x, max_x, min_y, max_y, image, max_iter, palette, samples):
     height, width, _ = image.shape
     pixel_size_x = (max_x - min_x) / float(width)
@@ -295,7 +295,7 @@ class Mandelbrot:
                     )
                     cuda.synchronize()
                     timings[backend] = time.time() - start
-                except Exception:
+                except RuntimeError:
                     timings[backend] = float('inf')
 
             elif backend == "opencl":
@@ -318,7 +318,9 @@ class Mandelbrot:
                     cl.enqueue_copy(self.queue, self.image_np, self.image_buf)
                     self.queue.finish()
                     timings[backend] = time.time() - start
-                except Exception:
+                    self.image_buf.release()
+                    self.palette_buf.release()
+                except RuntimeError:
                     timings[backend] = float('inf')
 
             else:  # CPU
@@ -381,8 +383,11 @@ class Mandelbrot:
                                    self.image_np.nbytes,
                                    hostbuf=self.image_np)
 
-        # Build Kernel
+        # Build program
         self.program = cl.Program(self.context, mandelbrot_kernel_cl).build()
+
+        # Store kernel
+        self.kernel_prog = cl.Kernel(self.program, "mandelbrot_kernel")
 
     # ---------------- INIT CUDA ----------------
     def _init_cuda(self):
@@ -393,16 +398,7 @@ class Mandelbrot:
                                            dtype=np.uint8)
         self.palette_device = cuda.to_device(self.palette)
 
-        # Auto-tune threads per block
-        try:
-            min_grid_size, block_size = cuda.occupancy_max_potential_block_size(mandelbrot_kernel_cuda)
-            if block_size > 0:
-                side = int(math.sqrt(block_size))
-                self.threads_per_block = (side, side)
-            else:
-                self.threads_per_block = (16, 16)
-        except RuntimeError:
-            self.threads_per_block = (16, 16)
+        self.threads_per_block = (16, 16)
 
         self.blocks_per_grid = (
             (self.width + self.threads_per_block[0] - 1) // self.threads_per_block[0],
@@ -433,16 +429,21 @@ class Mandelbrot:
     def _render_opencl(self, min_x, max_x, min_y, max_y, samples=2):
         start = time.time() if self.enable_timing else None
 
-        self.program.mandelbrot_kernel(
-            self.queue, (self.width, self.height), None,
-            self.precision(min_x), self.precision(max_x),
-            self.precision(min_y), self.precision(max_y),
-            self.image_buf,
-            np.int32(self.width), np.int32(self.height),
-            np.int32(self.max_iter),
-            self.palette_buf,
-            np.int32(samples)
-        )
+        self.kernel_prog.set_arg(0, self.precision(min_x))
+        self.kernel_prog.set_arg(1, self.precision(max_x))
+        self.kernel_prog.set_arg(2, self.precision(min_y))
+        self.kernel_prog.set_arg(3, self.precision(max_y))
+        self.kernel_prog.set_arg(4, self.image_buf)
+        self.kernel_prog.set_arg(5, np.int32(self.width))
+        self.kernel_prog.set_arg(6, np.int32(self.height))
+        self.kernel_prog.set_arg(7, np.int32(self.max_iter))
+        self.kernel_prog.set_arg(8, self.palette_buf)
+        self.kernel_prog.set_arg(9, np.int32(samples))
+
+        global_size = (self.width, self.height)
+        local_size = None  # Let OpenCL decide
+        cl.enqueue_nd_range_kernel(self.queue, self.kernel_prog,
+                                   global_size, local_size)
 
         cl.enqueue_copy(self.queue, self.image_np, self.image_buf)
         self.queue.finish()
@@ -491,17 +492,8 @@ class Mandelbrot:
         elif self.kernel == "cuda":
             self.image_gpu = cuda.device_array((self.height, self.width, 3),
                                                dtype=np.uint8)
-            # Auto-tune threads per block
-            try:
-                min_grid_size, block_size = cuda.occupancy_max_potential_block_size(
-                    mandelbrot_kernel_cuda)
-                if block_size > 0:
-                    side = int(math.sqrt(block_size))
-                    self.threads_per_block = (side, side)
-                else:
-                    self.threads_per_block = (16, 16)
-            except RuntimeError:
-                self.threads_per_block = (16, 16)
+
+            self.threads_per_block = (16, 16)
 
             print(
                 f"CUDA block size: {self.threads_per_block}, grid size: {self.blocks_per_grid}")

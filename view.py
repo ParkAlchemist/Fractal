@@ -245,8 +245,8 @@ class MandelbrotViewer(QMainWindow):
     def _pan_step(self, eased_t, pixmap):
         interp_x = self.start_x + (self.target_x - self.start_x) * eased_t
         interp_y = self.start_y + (self.target_y - self.start_y) * eased_t
-        dx = (interp_x - self.start_x) * self.zoom
-        dy = (interp_y - self.start_y) * self.zoom
+        dx = int((interp_x - self.start_x) * self.zoom)
+        dy = int((interp_y - self.start_y) * self.zoom)
 
         final_pixmap = QPixmap(self.label.size())
         final_pixmap.fill(Qt.black)
@@ -265,8 +265,8 @@ class MandelbrotViewer(QMainWindow):
                                       Qt.KeepAspectRatio,
                                       Qt.SmoothTransformation)
 
-        dx = self.label.width() / 2 - scaled_pixmap.width() / 2
-        dy = self.label.height() / 2 - scaled_pixmap.height() / 2
+        dx = int(self.label.width() / 2 - scaled_pixmap.width() / 2)
+        dy = int(self.label.height() / 2 - scaled_pixmap.height() / 2)
 
         final_pixmap = QPixmap(self.label.size())
         final_pixmap.fill(Qt.black)

@@ -5,7 +5,6 @@ from fractal import Mandelbrot
 
 
 class FullImageRenderWorker(QThread):
-    """Worker thread for full-frame rendering (single pass)."""
     image_rendered = pyqtSignal(QImage)  # QImage ready to display
 
     def __init__(self, mandelbrot: Mandelbrot, min_x, max_x, min_y, max_y, samples=2):
@@ -28,7 +27,6 @@ class FullImageRenderWorker(QThread):
             max_x=self.max_x,
             min_y=self.min_y,
             max_y=self.max_y,
-            samples=self.samples
         )
 
         # Ensure contiguous for QImage
@@ -45,14 +43,12 @@ class FullImageRenderWorker(QThread):
 
 
 class FullImageRenderer(QObject):
-    """Simple full-frame Mandelbrot renderer (single pass only)."""
     image_updated = pyqtSignal(QImage)
 
     def __init__(self, width, height, palette, kernel="auto", max_iter=1000, samples=2):
         super().__init__()
         self.width = width
         self.height = height
-        self.palette = palette
         self.kernel = kernel
         self.max_iter = max_iter
         self.samples = samples
@@ -60,13 +56,13 @@ class FullImageRenderer(QObject):
         # Create Mandelbrot instance for full frame
         self.mandelbrot = Mandelbrot(palette, kernel=kernel,
                                      img_width=width, img_height=height,
-                                     max_iter=max_iter, enable_timing=True)
+                                     max_iter=max_iter, enable_timing=True,
+                                     samples=samples)
 
         # Worker thread
         self._worker = None
 
     def render_frame(self, min_x, max_x, min_y, max_y):
-        """Render a single full-quality frame."""
         # Stop any running worker
         if self._worker is not None:
             self._worker.stop()
@@ -87,9 +83,15 @@ class FullImageRenderer(QObject):
             self._worker.wait()
 
     def update_palette(self, palette):
-        """Update the palette for Mandelbrot instance."""
-        self.palette = palette
         self.mandelbrot.change_palette(palette)
+
+    def update_max_iter(self, new_max):
+        self.max_iter = new_max
+        self.mandelbrot.max_iter = new_max
+
+    def update_samples(self, new_sample_amount):
+        self.samples = new_sample_amount
+        self.mandelbrot.samples = new_sample_amount
 
     def set_image_size(self, width, height):
         self.width = width

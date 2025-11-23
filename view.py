@@ -3,27 +3,37 @@ from datetime import datetime
 
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QLabel, QVBoxLayout, QWidget,
-    QPushButton, QComboBox, QFileDialog, QHBoxLayout)
+    QPushButton, QComboBox, QFileDialog, QHBoxLayout, QDockWidget, QTabWidget,
+    QFormLayout, QLineEdit, QSizePolicy)
 from PyQt5.QtGui import QPixmap, QPainter, QImage
 from PyQt5.QtCore import Qt, QTimer, QPropertyAnimation, QEasingCurve
+from torchgen.api.types import layoutT
 
 from palettes import palettes
 from render import FullImageRenderer
+from kernel import Kernel
 
 
 class MandelbrotViewer(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Mandelbrot Viewer")
-        self.setGeometry(100, 100, 1920, 1080)
+        self.window_height = 720
+        self.aspect_ratio = 16/9
+        self.window_width = int(self.window_height * self.aspect_ratio)
+        self.setGeometry(100, 100, self.window_width, self.window_height)
 
+        # Main fractal display
         self.label = QLabel(self)
         self.label.setAlignment(Qt.AlignCenter)
+        self.label.setScaledContents(True)
+        self.label.setSizePolicy(QSizePolicy.Policy.Expanding,
+                                 QSizePolicy.Policy.Expanding)
 
         # View parameters
         self.center_x = -0.5
         self.center_y = 0.0
-        self.zoom = 400.0
+        self.zoom = 250.0
         self.zoom_factor = 1.5
 
         # Animation state
@@ -43,9 +53,11 @@ class MandelbrotViewer(QMainWindow):
         self.start_center_x = None
         self.start_center_y = None
 
+        # Palette
         self.palette_name = "Classic"
         self.palette = palettes[self.palette_name]
 
+        # Image
         self.cached_image = None
         self.rendered_image = None
         self.renderer = None
@@ -53,9 +65,11 @@ class MandelbrotViewer(QMainWindow):
         self.init_ui()
 
     def init_ui(self):
+        # Central layout
         layout = QVBoxLayout()
         layout.addWidget(self.label)
 
+        # Bottom controls
         controls = QHBoxLayout()
         self.palette_combo = QComboBox()
         self.palette_combo.addItems(palettes.keys())
@@ -71,6 +85,104 @@ class MandelbrotViewer(QMainWindow):
         container = QWidget()
         container.setLayout(layout)
         self.setCentralWidget(container)
+
+        # --------------------------------------
+        # ----------- Side Menu ----------------
+        # --------------------------------------
+        self.side_menu = QDockWidget("Controls", self)
+        self.side_menu.setAllowedAreas(Qt.RightDockWidgetArea)
+        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.side_menu)
+        self.side_menu.setFeatures(QDockWidget.NoDockWidgetFeatures)
+
+        tabs = QTabWidget()
+        self.side_menu.setWidget(tabs)
+
+        # --------- Render tab -----------------
+        render_tab = QWidget()
+        render_layout = QFormLayout()
+
+        # Max iter
+        self.iter_input = QComboBox()
+        self.iter_input.addItems(["100", "200", "500", "1000", "2000", "5000"])
+        self.iter_input.setCurrentText("1000")
+        render_layout.addRow("Max Iterations: ", self.iter_input)
+
+        # Samples
+        self.samples_input = QComboBox()
+        self.samples_input.addItems(["1", "2", "4", "8"])
+        self.samples_input.setCurrentText("2")
+        render_layout.addRow("Samples: ", self.samples_input)
+
+        # Apply button
+        apply_render_btn = QPushButton("Apply")
+        apply_render_btn.clicked.connect(self.apply_render_settings)
+        render_layout.addRow(apply_render_btn)
+
+        render_tab.setLayout(render_layout)
+
+        # --------- Palette tab -----------------
+        palette_tab = QWidget()
+        palette_layout = QVBoxLayout()
+        palette_layout.addWidget(self.palette_combo)
+        palette_tab.setLayout(palette_layout)
+
+        # --------- View tab -----------------
+        view_tab = QWidget()
+        view_layout = QFormLayout()
+
+        # Center
+        self.center_x_input = QLineEdit(str(self.center_x))
+        self.center_y_input = QLineEdit(str(self.center_y))
+        view_layout.addRow("Center X: ", self.center_x_input)
+        view_layout.addRow("Center Y: ", self.center_y_input)
+
+        # Zoom
+        self.zoom_input = QLineEdit(str(self.zoom))
+        view_layout.addRow("Zoom: ", self.zoom_input)
+
+        # Zoom Factor
+        self.zoom_factor_input = QLineEdit(str(self.zoom_factor))
+        view_layout.addRow("Zoom Factor: ", self.zoom_factor_input)
+
+        # Apply button
+        apply_view_btn = QPushButton("Apply")
+        apply_view_btn.clicked.connect(self.apply_view_settings)
+        view_layout.addRow(apply_view_btn)
+
+        view_tab.setLayout(view_layout)
+
+        # ---------- Finalíze -------------
+        tabs.addTab(render_tab, "Render")
+        tabs.addTab(palette_tab, "Palette")
+        tabs.addTab(view_tab, "View")
+
+
+    # ---------- Tab Actions -----------------
+    def apply_render_settings(self):
+        if self.renderer:
+            max_iter = int(self.iter_input.currentText())
+            samples = int(self.samples_input.currentText())
+
+            self.renderer.update_max_iter(max_iter)
+            self.renderer.update_samples(samples)
+
+            self.render_fractal()
+
+    def apply_view_settings(self):
+        try:
+            self.center_x = float(self.center_x_input.text())
+            self.center_y = float(self.center_y_input.text())
+            self.zoom = float(self.zoom_input.text())
+            self.zoom_factor = float(self.zoom_factor_input.text())
+            self.render_fractal()
+        except ValueError:
+            pass
+
+    def update_view_tab_fields(self):
+        if hasattr(self, "center_x_input") and hasattr(self, "center_y_input") and hasattr(self, "zoom_input"):
+            self.center_x_input.setText(str(self.center_x))
+            self.center_y_input.setText(str(self.center_y))
+            self.zoom_input.setText(str(self.zoom))
 
     def change_palette(self, name):
         self.palette_name = name
@@ -97,7 +209,7 @@ class MandelbrotViewer(QMainWindow):
 
         if self.renderer is None:
             self.renderer = FullImageRenderer(width, height,
-                                              self.palette, kernel="auto",
+                                              self.palette, kernel=Kernel.CPU,
                                               max_iter=1000, samples=2)
             self.renderer.image_updated.connect(self.update_image)
 
@@ -141,14 +253,14 @@ class MandelbrotViewer(QMainWindow):
 
             if old_image:
                 old_pixmap = QPixmap.fromImage(old_image).scaled(width, height,
-                                                                 Qt.KeepAspectRatio,
-                                                                 Qt.SmoothTransformation)
+                                                                 Qt.AspectRatioMode.KeepAspectRatio,
+                                                                 Qt.TransformationMode.SmoothTransformation)
                 painter.setOpacity(1.0 - value)
                 painter.drawPixmap(0, 0, old_pixmap)
 
             new_pixmap = QPixmap.fromImage(new_image).scaled(width, height,
-                                                             Qt.KeepAspectRatio,
-                                                             Qt.SmoothTransformation)
+                                                             Qt.AspectRatioMode.KeepAspectRatio,
+                                                             Qt.TransformationMode.SmoothTransformation)
             painter.setOpacity(value)
             painter.drawPixmap(0, 0, new_pixmap)
 
@@ -189,6 +301,7 @@ class MandelbrotViewer(QMainWindow):
 
         # Prepare animation
         self.start_x, self.start_y, self.start_zoom = self.center_x, self.center_y, self.zoom
+        self.update_view_tab_fields()
         self.phase = 0 if zoom_in else 1
         self.current_step = 0
 
@@ -227,9 +340,11 @@ class MandelbrotViewer(QMainWindow):
         if self.current_step == self.animation_steps // 2:
             if self.phase == 0:
                 self.center_x, self.center_y = self.target_x, self.target_y
+                self.update_view_tab_fields()
                 self.phase = 1
             elif self.phase == 1:
                 self.zoom = self.target_zoom
+                self.update_view_tab_fields()
                 self.phase = 0
             self.cached_image = QImage(self.label.pixmap())
 
@@ -237,6 +352,7 @@ class MandelbrotViewer(QMainWindow):
         if self.current_step >= self.animation_steps:
             self.animation_timer.stop()
             self.center_x, self.center_y, self.zoom = self.target_x, self.target_y, self.target_zoom
+            self.update_view_tab_fields()
             self.cached_image = QImage(self.label.pixmap())
             if self.final_render_pending:
                 self._fade_in_image(self.rendered_image)
@@ -298,8 +414,8 @@ class MandelbrotViewer(QMainWindow):
             pixmap = QPixmap.fromImage(self.cached_image)
             scaled_pixmap = pixmap.scaled(self.label.width(),
                                           self.label.height(),
-                                          Qt.KeepAspectRatio,
-                                          Qt.SmoothTransformation)
+                                          Qt.AspectRatioMode.KeepAspectRatio,
+                                          Qt.TransformationMode.SmoothTransformation)
 
             final_pixmap = QPixmap(self.label.size())
             final_pixmap.fill(Qt.black)
@@ -311,6 +427,7 @@ class MandelbrotViewer(QMainWindow):
 
             self.center_x = current_center_x
             self.center_y = current_center_y
+            self.update_view_tab_fields()
 
     def mouseReleaseEvent(self, event):
         if event.button() == Qt.LeftButton and self.dragging:
@@ -320,11 +437,22 @@ class MandelbrotViewer(QMainWindow):
 
     def resizeEvent(self, event):
         # Handle window resize: re-render fractal if viewport size changed
+        if not hasattr(self, "resize_timer"):
+            self.resize_timer = QTimer()
+            self.resize_timer.setSingleShot(True)
+            self.resize_timer.timeout.connect(self.render_fractal)
+
         if self.label.width() > 0 and self.label.height() > 0:
             if self.renderer is not None:
                 self.renderer.set_image_size(self.label.width(),
                                              self.label.height())
-                self.render_fractal()
+                if self.cached_image:
+                    scaled_pixmap = QPixmap.fromImage(self.cached_image).scaled(
+                        self.label.size(),
+                        Qt.AspectRatioMode.IgnoreAspectRatio,
+                        Qt.TransformationMode.SmoothTransformation)
+                    self.label.setPixmap(scaled_pixmap)
+                self.resize_timer.start(250)
         super().resizeEvent(event)
 
     def closeEvent(self, event):

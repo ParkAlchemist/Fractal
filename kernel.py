@@ -1,6 +1,13 @@
 import math
+from enum import Enum
 import numpy as np
 from numba import cuda, njit, prange
+
+class Kernel(Enum):
+    AUTO = 0
+    OPENCL = 1
+    CUDA = 2
+    CPU = 3
 
 # --------------------------------------------------------
 # ---------------------- OpenCL KERNEL -------------------

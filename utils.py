@@ -1,4 +1,8 @@
 import os
+from numba import cuda
+import pyopencl as cl
+
+from kernel import Kernel
 
 
 def fractal_to_image_coords(fx, fy, center_x, center_y, zoom, image_width, image_height):
@@ -120,3 +124,13 @@ def clear_cache_lock():
             print(f"Removed stale PyOpenCL cache lock: {lock_file}")
         except PermissionError:
             print(f"Could not remove PyOpenCL cache lock: {lock_file}, check permissions.")
+
+def available_backends():
+    # Return a list of available rendering backends
+    backends = []
+    if cl.get_platforms():
+        backends.append(Kernel.OPENCL.name)
+    if cuda.is_available():
+        backends.append(Kernel.CUDA.name)
+    backends.append(Kernel.CPU.name)
+    return backends

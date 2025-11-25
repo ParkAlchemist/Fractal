@@ -3,7 +3,7 @@ import numpy as np
 from numba import cuda
 import pyopencl as cl
 
-from utils import clear_cache_lock
+from utils import clear_cache_lock, available_backends
 from kernel import (mandelbrot_kernel_cl,
                     mandelbrot_kernel_cuda,
                     mandelbrot_kernel_cpu,
@@ -38,25 +38,22 @@ class Mandelbrot:
 
         # Auto mode: select available backend opencl -> cuda -> cpu
         if self.kernel == Kernel.AUTO:
-
             # Detect available backends
-            available_backends = []
-            if cuda.is_available():
-                available_backends.append(Kernel.CUDA)
-            try:
-                if cl.get_platforms():
-                    available_backends.append(Kernel.OPENCL)
-            except RuntimeError:
-                pass
-            available_backends.append(Kernel.CPU)
+            self.available_backends = available_backends()
 
-            if Kernel.OPENCL in available_backends:
+            if Kernel.OPENCL.name in self.available_backends:
                 self.kernel = Kernel.OPENCL
-            elif Kernel.CUDA in available_backends:
+            elif Kernel.CUDA.name in self.available_backends:
                 self.kernel = Kernel.CUDA
             else:
                 self.kernel = Kernel.CPU
 
+        self._init_kernel()
+
+    # ----------------------------------------------
+    # --------------- KERNEL INITS -----------------
+    # ----------------------------------------------
+    def _init_kernel(self):
         # Init backend
         if self.kernel == Kernel.OPENCL:
             self._init_opencl()
@@ -71,7 +68,8 @@ class Mandelbrot:
             self.render = self._render_cpu
             print("Using CPU backend.")
         else:
-            raise ValueError(f"Kernel must be {Kernel.OPENCL.name}, {Kernel.CUDA.name} or {Kernel.CPU.name}.")
+            raise ValueError(
+                f"Kernel must be {Kernel.OPENCL.name}, {Kernel.CUDA.name} or {Kernel.CPU.name}.")
 
     # ---------------- INIT OPENCL ----------------
     def _init_opencl(self):
@@ -228,6 +226,8 @@ class Mandelbrot:
     def change_palette(self, palette):
         self.palette = np.array(palette, dtype=np.uint8).reshape(-1, 3).flatten()
         if self.kernel == Kernel.OPENCL:
+            if hasattr(self, "palette_buf"):
+                self.palette_buf.release()
             self.palette_buf = cl.Buffer(self.context,
                                          cl.mem_flags.READ_ONLY | cl.mem_flags.COPY_HOST_PTR,
                                          hostbuf=self.palette)
@@ -242,6 +242,8 @@ class Mandelbrot:
         if self.kernel == Kernel.OPENCL:
             self.image_np = np.zeros(self.width * self.height * 3,
                                      dtype=np.uint8)
+            if hasattr(self, "image_buf"):
+                self.image_buf.release()
             self.image_buf = cl.Buffer(self.context,
                                        cl.mem_flags.WRITE_ONLY | cl.mem_flags.COPY_HOST_PTR,
                                        self.image_np.nbytes,
@@ -250,12 +252,52 @@ class Mandelbrot:
             self.image_gpu = cuda.device_array((self.height, self.width, 3),
                                                dtype=np.uint8)
 
+    # ---------------- Kernel Change ----------------
+    def change_kernel(self, new_kernel):
+        if new_kernel == self.kernel:
+            return
+
+        # Cleanup
+        self.close()
+
+        # Init new kernel
+        self.kernel = new_kernel
+        self._init_kernel()
+        print(f"Kernel switched to {self.kernel.name} successfully.")
+
     # ---------------- CLEANUP ----------------
     def close(self):
-        if self.image_buf:
+        # OpenCL cleanup
+        if hasattr(self, "image_buf") and self.image_buf is not None:
             self.image_buf.release()
-        if self.palette_buf:
+            self.image_buf = None
+        if hasattr(self, "palette_buf") and self.palette_buf is not None:
             self.palette_buf.release()
+            self.palette_buf = None
+        if hasattr(self, "queue") and self.queue is not None:
+            try:
+                self.queue.finish()
+            except Exception:
+                pass
+            self.queue = None
+        if hasattr(self, "context"):
+            self.context = None
+        if hasattr(self, "program"):
+            self.program = None
+        if hasattr(self, "kernel_prog"):
+            self.kernel_prog = None
+
+        # CUDA cleanup
+        if hasattr(self, "image_gpu") and self.image_gpu is not None:
+            del self.image_gpu
+            self.image_gpu = None
+        if hasattr(self, "palette_device") and self.palette_device is not None:
+            del self.palette_device
+            self.palette_device = None
+
+        # General cleanup
+        clear_cache_lock()
+
 
     def __enter__(self):
         return self

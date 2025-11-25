@@ -2,6 +2,7 @@ from PyQt5.QtCore import pyqtSignal, QObject, QThread
 from PyQt5.QtGui import QImage
 
 from fractal import Mandelbrot
+from kernel import Kernel
 
 
 class FullImageRenderWorker(QThread):
@@ -45,7 +46,7 @@ class FullImageRenderWorker(QThread):
 class FullImageRenderer(QObject):
     image_updated = pyqtSignal(QImage)
 
-    def __init__(self, width, height, palette, kernel="auto", max_iter=1000, samples=2):
+    def __init__(self, width, height, palette, kernel=Kernel.AUTO, max_iter=1000, samples=2):
         super().__init__()
         self.width = width
         self.height = height
@@ -81,6 +82,15 @@ class FullImageRenderer(QObject):
         if self._worker is not None:
             self._worker.stop()
             self._worker.wait()
+
+    # ------------- Parameter fetching ---------------
+    def available_backends(self):
+        return self.mandelbrot.available_backends
+
+    # ------------- Parameter updates -----------------
+    def change_kernel(self, new_kernel):
+        self.kernel = new_kernel
+        self.mandelbrot.change_kernel(new_kernel)
 
     def update_palette(self, palette):
         self.mandelbrot.change_palette(palette)

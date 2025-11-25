@@ -7,11 +7,11 @@ from PyQt5.QtWidgets import (
     QFormLayout, QLineEdit, QSizePolicy)
 from PyQt5.QtGui import QPixmap, QPainter, QImage
 from PyQt5.QtCore import Qt, QTimer, QPropertyAnimation, QEasingCurve
-from torchgen.api.types import layoutT
 
 from palettes import palettes
 from render import FullImageRenderer
 from kernel import Kernel
+from utils import available_backends
 
 
 class MandelbrotViewer(QMainWindow):
@@ -69,14 +69,10 @@ class MandelbrotViewer(QMainWindow):
         layout = QVBoxLayout()
         layout.addWidget(self.label)
 
-        # Bottom controls
+        # ------------ Bottom controls -----------------
         controls = QHBoxLayout()
-        self.palette_combo = QComboBox()
-        self.palette_combo.addItems(palettes.keys())
-        self.palette_combo.setCurrentText(self.palette_name)
-        self.palette_combo.currentTextChanged.connect(self.change_palette)
-        controls.addWidget(self.palette_combo)
 
+        # Save Image Button
         save_button = QPushButton("Save Image")
         save_button.clicked.connect(self.save_image)
         controls.addWidget(save_button)
@@ -101,6 +97,13 @@ class MandelbrotViewer(QMainWindow):
         render_tab = QWidget()
         render_layout = QFormLayout()
 
+        # Kernel
+        self.kernel_input = QComboBox()
+        backends = available_backends()
+        self.kernel_input.addItems(sorted(backends))
+        self.kernel_input.setCurrentText(backends[0])
+        render_layout.addRow("Kernel: ", self.kernel_input)
+
         # Max iter
         self.iter_input = QComboBox()
         self.iter_input.addItems(["100", "200", "500", "1000", "2000", "5000"])
@@ -122,8 +125,15 @@ class MandelbrotViewer(QMainWindow):
 
         # --------- Palette tab -----------------
         palette_tab = QWidget()
-        palette_layout = QVBoxLayout()
-        palette_layout.addWidget(self.palette_combo)
+        palette_layout = QFormLayout()
+
+        # Palette
+        self.palette_input = QComboBox()
+        self.palette_input.addItems(palettes.keys())
+        self.palette_input.setCurrentText(self.palette_name)
+        self.palette_input.currentTextChanged.connect(self.change_palette)
+        palette_layout.addRow(self.palette_input)
+
         palette_tab.setLayout(palette_layout)
 
         # --------- View tab -----------------
@@ -166,6 +176,20 @@ class MandelbrotViewer(QMainWindow):
             self.renderer.update_max_iter(max_iter)
             self.renderer.update_samples(samples)
 
+            kernel_str = self.kernel_input.currentText()
+            if kernel_str == "OPENCL":
+                new_kernel = Kernel.OPENCL
+            elif kernel_str == "CUDA":
+                new_kernel = Kernel.CUDA
+            elif kernel_str == "CPU":
+                new_kernel = Kernel.CPU
+            else:
+                raise ValueError("Incorrect Kernel")
+
+            if self.renderer.kernel != new_kernel:
+                # Change current kernel
+                self.renderer.change_kernel(new_kernel)
+
             self.render_fractal()
 
     def apply_view_settings(self):
@@ -184,6 +208,7 @@ class MandelbrotViewer(QMainWindow):
             self.center_y_input.setText(str(self.center_y))
             self.zoom_input.setText(str(self.zoom))
 
+    # --------------- Palette update -----------------
     def change_palette(self, name):
         self.palette_name = name
         self.palette = palettes[name]
@@ -191,6 +216,7 @@ class MandelbrotViewer(QMainWindow):
             self.renderer.update_palette(self.palette)
         self.render_fractal()
 
+    # -------------- Save Image ------------------
     def save_image(self):
         if self.cached_image:
             path, _ = QFileDialog.getSaveFileName(
@@ -201,6 +227,7 @@ class MandelbrotViewer(QMainWindow):
             if path:
                 self.cached_image.save(path)
 
+    # ----------- Render ---------------
     def render_fractal(self):
         width = self.label.width()
         height = self.label.height()
@@ -209,7 +236,7 @@ class MandelbrotViewer(QMainWindow):
 
         if self.renderer is None:
             self.renderer = FullImageRenderer(width, height,
-                                              self.palette, kernel=Kernel.CPU,
+                                              self.palette, kernel=Kernel.AUTO,
                                               max_iter=1000, samples=2)
             self.renderer.image_updated.connect(self.update_image)
 
@@ -221,6 +248,7 @@ class MandelbrotViewer(QMainWindow):
 
         self.renderer.render_frame(min_x, max_x, min_y, max_y)
 
+    # ------------ View Update ---------------
     def update_image(self, image):
         self.rendered_image = image
         if not self.cached_image:
@@ -435,6 +463,7 @@ class MandelbrotViewer(QMainWindow):
             self.cached_image = QImage(self.label.pixmap())
             self.render_fractal()
 
+    # -------------- Window Actions -----------------
     def resizeEvent(self, event):
         # Handle window resize: re-render fractal if viewport size changed
         if not hasattr(self, "resize_timer"):

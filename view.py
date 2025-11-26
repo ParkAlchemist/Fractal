@@ -4,12 +4,12 @@ from datetime import datetime
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QLabel, QVBoxLayout, QWidget,
     QPushButton, QComboBox, QFileDialog, QHBoxLayout, QDockWidget, QTabWidget,
-    QFormLayout, QLineEdit, QSizePolicy)
+    QFormLayout, QLineEdit, QSizePolicy, QRadioButton, QButtonGroup)
 from PyQt5.QtGui import QPixmap, QPainter, QImage
 from PyQt5.QtCore import Qt, QTimer, QPropertyAnimation, QEasingCurve
 
 from palettes import palettes
-from render import FullImageRenderer
+from render import FullImageRenderer, ColoringMode
 from kernel import Kernel
 from utils import available_backends
 
@@ -127,6 +127,25 @@ class MandelbrotViewer(QMainWindow):
         palette_tab = QWidget()
         palette_layout = QFormLayout()
 
+        # Coloring Mode
+        self.coloring_mode_group = QButtonGroup(self)
+        self.radio_exterior = QRadioButton("Exterior")
+        self.radio_interior = QRadioButton("Interior")
+        self.radio_hybrid = QRadioButton("Hybrid")
+        self.radio_hybrid.setChecked(True)  # Default
+
+        self.coloring_mode_group.addButton(self.radio_exterior)
+        self.coloring_mode_group.addButton(self.radio_interior)
+        self.coloring_mode_group.addButton(self.radio_hybrid)
+
+        palette_layout.addRow("Coloring Mode: ", self.radio_exterior)
+        palette_layout.addRow("", self.radio_interior)
+        palette_layout.addRow("", self.radio_hybrid)
+
+        self.radio_exterior.toggled.connect(lambda checked: checked and self.change_coloring_mode(ColoringMode.EXTERIOR))
+        self.radio_interior.toggled.connect(lambda checked: checked and self.change_coloring_mode(ColoringMode.INTERIOR))
+        self.radio_hybrid.toggled.connect(lambda checked: checked and self.change_coloring_mode(ColoringMode.HYBRID))
+
         # Palette
         self.palette_input = QComboBox()
         self.palette_input.addItems(palettes.keys())
@@ -173,8 +192,10 @@ class MandelbrotViewer(QMainWindow):
             max_iter = int(self.iter_input.currentText())
             samples = int(self.samples_input.currentText())
 
-            self.renderer.update_max_iter(max_iter)
-            self.renderer.update_samples(samples)
+            if self.renderer.max_iter != max_iter:
+                self.renderer.set_max_iter(max_iter)
+            if self.renderer.samples != samples:
+                self.renderer.set_samples(samples)
 
             kernel_str = self.kernel_input.currentText()
             if kernel_str == "OPENCL":
@@ -188,8 +209,13 @@ class MandelbrotViewer(QMainWindow):
 
             if self.renderer.kernel != new_kernel:
                 # Change current kernel
-                self.renderer.change_kernel(new_kernel)
+                self.renderer.set_kernel(new_kernel)
 
+            self.render_fractal()
+
+    def change_coloring_mode(self, mode):
+        if self.renderer:
+            self.renderer.set_coloring_mode(mode)
             self.render_fractal()
 
     def apply_view_settings(self):
@@ -213,7 +239,7 @@ class MandelbrotViewer(QMainWindow):
         self.palette_name = name
         self.palette = palettes[name]
         if self.renderer:
-            self.renderer.update_palette(self.palette)
+            self.renderer.set_palette(self.palette)
         self.render_fractal()
 
     # -------------- Save Image ------------------

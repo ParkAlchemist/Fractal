@@ -14,10 +14,9 @@ from kernel import (mandelbrot_kernel_cl,
 # ------------------------ CLASS -------------------------
 # --------------------------------------------------------
 class Mandelbrot:
-    def __init__(self, palette, kernel=Kernel.AUTO, img_width=800, img_height=600,
+    def __init__(self, kernel=Kernel.AUTO, img_width=800, img_height=600,
                  max_iter=1000, precision="float32", enable_timing=False, samples=2):
 
-        self.palette = np.array(palette, dtype=np.uint8).reshape(-1, 3).flatten()
         self.width = img_width
         self.height = img_height
         self.max_iter = max_iter
@@ -35,6 +34,8 @@ class Mandelbrot:
         self.wu_samples = 1
         self.wu_width = 256
         self.wu_height = 256
+        self.cpu_warmed_up = False
+        self.cuda_warmed_up = False
 
         # Auto mode: select available backend opencl -> cuda -> cpu
         if self.kernel == Kernel.AUTO:
@@ -105,15 +106,11 @@ class Mandelbrot:
             raise RuntimeError(f"OpenCL initialization failed: {e}")
 
         # Allocate buffers
-        self.palette_buf = cl.Buffer(self.context,
-                                     cl.mem_flags.READ_ONLY | cl.mem_flags.COPY_HOST_PTR,
-                                     hostbuf=self.palette)
-
-        self.image_np = np.zeros(self.width * self.height * 3, dtype=np.uint8)
-        self.image_buf = cl.Buffer(self.context,
+        self.iter_np = np.zeros(self.width * self.height, dtype=np.float32)
+        self.iter_buf = cl.Buffer(self.context,
                                    cl.mem_flags.WRITE_ONLY | cl.mem_flags.COPY_HOST_PTR,
-                                   self.image_np.nbytes,
-                                   hostbuf=self.image_np)
+                                   self.iter_np.nbytes,
+                                   hostbuf=self.iter_np)
 
         # Build program
         self.program = cl.Program(self.context, mandelbrot_kernel_cl).build()
@@ -126,10 +123,8 @@ class Mandelbrot:
         if not cuda.is_available():
             raise RuntimeError("CUDA not available on this system.")
 
-        self.image_gpu = cuda.device_array((self.height, self.width, 3),
-                                           dtype=np.uint8)
-        self.palette_device = cuda.to_device(self.palette)
-
+        self.iter_gpu = cuda.device_array((self.height, self.width),
+                                           dtype=np.float32)
         self.threads_per_block = (16, 16)
 
         self.blocks_per_grid = (
@@ -140,18 +135,21 @@ class Mandelbrot:
         print(f"CUDA block size: {self.threads_per_block}, grid size: {self.blocks_per_grid}")
 
         # Warm up
-        print("Warming up...")
+        if self.cuda_warmed_up: return
+        print("Warming up CUDA kernel...")
         mandelbrot_kernel_cuda[self.blocks_per_grid, self.threads_per_block](
             self.precision(self.wu_min_x), self.precision(self.wu_max_x),
             self.precision(self.wu_min_y), self.precision(self.wu_max_y),
-            self.image_gpu, np.int32(self.wu_max_iter),
-            self.palette_device, np.int32(self.wu_samples)
+            self.iter_gpu, np.int32(self.wu_max_iter),
+            np.int32(self.wu_samples)
         )
         print("Warmed up!")
+        self.cuda_warmed_up = True
 
     # ---------------- Init CPU --------------------
     def _init_cpu(self):
-        print("Warming up...")
+        if self.cpu_warmed_up: return
+        print("Warming up CPU kernel...")
         real = np.linspace(self.wu_min_x, self.wu_max_x,
                            self.wu_width, dtype=self.precision)
         imag = np.linspace(self.wu_min_y, self.wu_max_y,
@@ -159,8 +157,9 @@ class Mandelbrot:
         real_grid, imag_grid = np.meshgrid(real, imag)
         mandelbrot_kernel_cpu(real_grid, imag_grid,
                               self.wu_width, self.wu_height,
-                              self.wu_max_iter, self.wu_samples, self.palette)
+                              self.wu_max_iter, self.wu_samples)
         print("Warmed up!")
+        self.cpu_warmed_up = True
 
     # ---------------- CUDA RENDER ----------------
     def _render_cuda(self, min_x, max_x, min_y, max_y):
@@ -169,11 +168,11 @@ class Mandelbrot:
         mandelbrot_kernel_cuda[self.blocks_per_grid, self.threads_per_block](
             self.precision(min_x), self.precision(max_x),
             self.precision(min_y), self.precision(max_y),
-            self.image_gpu, np.int32(self.max_iter),
-            self.palette_device, np.int32(self.samples)
+            self.iter_gpu, np.int32(self.max_iter),
+            np.int32(self.samples)
         )
         cuda.synchronize()
-        result = self.image_gpu.copy_to_host()
+        result = self.iter_gpu.copy_to_host()
 
         if self.enable_timing:
             print(f"CUDA render time: {time.time() - start:.3f}s")
@@ -188,25 +187,24 @@ class Mandelbrot:
         self.kernel_prog.set_arg(1, self.precision(max_x))
         self.kernel_prog.set_arg(2, self.precision(min_y))
         self.kernel_prog.set_arg(3, self.precision(max_y))
-        self.kernel_prog.set_arg(4, self.image_buf)
+        self.kernel_prog.set_arg(4, self.iter_buf)
         self.kernel_prog.set_arg(5, np.int32(self.width))
         self.kernel_prog.set_arg(6, np.int32(self.height))
         self.kernel_prog.set_arg(7, np.int32(self.max_iter))
-        self.kernel_prog.set_arg(8, self.palette_buf)
-        self.kernel_prog.set_arg(9, np.int32(self.samples))
+        self.kernel_prog.set_arg(8, np.int32(self.samples))
 
         global_size = (self.width, self.height)
         local_size = None  # Let OpenCL decide
         cl.enqueue_nd_range_kernel(self.queue, self.kernel_prog,
                                    global_size, local_size)
 
-        cl.enqueue_copy(self.queue, self.image_np, self.image_buf)
+        cl.enqueue_copy(self.queue, self.iter_np, self.iter_buf)
         self.queue.finish()
 
         if self.enable_timing:
             print(f"OpenCL render time: {time.time() - start:.3f}s")
 
-        return self.image_np.reshape((self.height, self.width, 3))
+        return self.iter_np.reshape((self.height, self.width))
 
     # ---------------- CPU RENDER -------------------
     def _render_cpu(self, min_x, max_x, min_y, max_y):
@@ -217,22 +215,10 @@ class Mandelbrot:
         real_grid, imag_grid = np.meshgrid(real, imag)
         img = mandelbrot_kernel_cpu(real_grid, imag_grid,
                                     self.width, self.height,
-                                    self.max_iter, self.samples, self.palette)
+                                    self.max_iter, self.samples)
         if self.enable_timing:
             print(f"CPU render time: {time.time() - start:.3f}s")
         return img
-
-    # ---------------- PALETTE UPDATE ----------------
-    def change_palette(self, palette):
-        self.palette = np.array(palette, dtype=np.uint8).reshape(-1, 3).flatten()
-        if self.kernel == Kernel.OPENCL:
-            if hasattr(self, "palette_buf"):
-                self.palette_buf.release()
-            self.palette_buf = cl.Buffer(self.context,
-                                         cl.mem_flags.READ_ONLY | cl.mem_flags.COPY_HOST_PTR,
-                                         hostbuf=self.palette)
-        elif self.kernel == Kernel.CUDA:
-            self.palette_device = cuda.to_device(self.palette)
 
     # ------------ IMAGE SIZE UPDATE ---------------
     def change_image_size(self, width, height):
@@ -240,17 +226,17 @@ class Mandelbrot:
         self.height = height
 
         if self.kernel == Kernel.OPENCL:
-            self.image_np = np.zeros(self.width * self.height * 3,
-                                     dtype=np.uint8)
-            if hasattr(self, "image_buf"):
-                self.image_buf.release()
-            self.image_buf = cl.Buffer(self.context,
+            self.iter_np = np.zeros(self.width * self.height,
+                                     dtype=np.float32)
+            if hasattr(self, "iter_buf"):
+                self.iter_buf.release()
+            self.iter_buf = cl.Buffer(self.context,
                                        cl.mem_flags.WRITE_ONLY | cl.mem_flags.COPY_HOST_PTR,
-                                       self.image_np.nbytes,
-                                       hostbuf=self.image_np)
+                                       self.iter_np.nbytes,
+                                       hostbuf=self.iter_np)
         elif self.kernel == Kernel.CUDA:
-            self.image_gpu = cuda.device_array((self.height, self.width, 3),
-                                               dtype=np.uint8)
+            self.iter_gpu = cuda.device_array((self.height, self.width),
+                                               dtype=np.float32)
 
     # ---------------- Kernel Change ----------------
     def change_kernel(self, new_kernel):
@@ -268,12 +254,9 @@ class Mandelbrot:
     # ---------------- CLEANUP ----------------
     def close(self):
         # OpenCL cleanup
-        if hasattr(self, "image_buf") and self.image_buf is not None:
-            self.image_buf.release()
-            self.image_buf = None
-        if hasattr(self, "palette_buf") and self.palette_buf is not None:
-            self.palette_buf.release()
-            self.palette_buf = None
+        if hasattr(self, "iter_buf") and self.iter_buf is not None:
+            self.iter_buf.release()
+            self.iter_buf = None
         if hasattr(self, "queue") and self.queue is not None:
             try:
                 self.queue.finish()
@@ -288,12 +271,9 @@ class Mandelbrot:
             self.kernel_prog = None
 
         # CUDA cleanup
-        if hasattr(self, "image_gpu") and self.image_gpu is not None:
-            del self.image_gpu
-            self.image_gpu = None
-        if hasattr(self, "palette_device") and self.palette_device is not None:
-            del self.palette_device
-            self.palette_device = None
+        if hasattr(self, "iter_gpu") and self.iter_gpu is not None:
+            del self.iter_gpu
+            self.iter_gpu = None
 
         # General cleanup
         clear_cache_lock()

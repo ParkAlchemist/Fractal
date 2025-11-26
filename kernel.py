@@ -16,10 +16,9 @@ mandelbrot_kernel_cl = """
 __kernel void mandelbrot_kernel(
     const float min_x, const float max_x,
     const float min_y, const float max_y,
-    __global uchar *image,
+    __global float *iter_buf,
     const int width, const int height,
     const int max_iter,
-    __global const uchar *palette,
     const int samples)
 {
     int x = get_global_id(0);
@@ -29,7 +28,8 @@ __kernel void mandelbrot_kernel(
     float pixel_size_x = (max_x - min_x) / (float)width;
     float pixel_size_y = (max_y - min_y) / (float)height;
 
-    float r_accum = 0.0f, g_accum = 0.0f, b_accum = 0.0f;
+    float accum = 0.0f;
+    float total_samples = (float)(samples * samples);
 
     for (int sx = 0; sx < samples; sx++)
     for (int sy = 0; sy < samples; sy++)
@@ -59,31 +59,11 @@ __kernel void mandelbrot_kernel(
         float nu = log(log_zn / 0.69314718f) / 0.69314718f;
         float smooth_iter = i < max_iter ? (float)(i + 1) - nu : (float)i;
 
-        float norm = smooth_iter / (float)max_iter;
-        norm = fmax(0.0f, fmin(1.0f, norm));
-
-        float idx_f = norm * 255.0f;
-        int idx = (int)idx_f;
-        int idx_next = min(idx + 1, 255);
-        float t = idx_f - (float)idx;
-
-        int base_idx0 = idx * 3;
-        int base_idx1 = idx_next * 3;
-
-        float r = (1.0f - t) * palette[base_idx0 + 0] + t * palette[base_idx1 + 0];
-        float g = (1.0f - t) * palette[base_idx0 + 1] + t * palette[base_idx1 + 1];
-        float b = (1.0f - t) * palette[base_idx0 + 2] + t * palette[base_idx1 + 2];
-
-        r_accum += r;
-        g_accum += g;
-        b_accum += b;
+        accum += smooth_iter / (float)max_iter;
     }
 
-    float total_samples = (float)(samples * samples);
-    int base_idx = (y * width + x) * 3;
-    image[base_idx + 0] = (uchar)(r_accum / total_samples);
-    image[base_idx + 1] = (uchar)(g_accum / total_samples);
-    image[base_idx + 2] = (uchar)(b_accum / total_samples);
+    int idx = y * width + x;
+    iter_buf[idx] = accum / total_samples;
 }
 """
 
@@ -91,8 +71,8 @@ __kernel void mandelbrot_kernel(
 # ---------------------- CUDA KERNEL ---------------------
 # --------------------------------------------------------
 @cuda.jit(fastmath=True)
-def mandelbrot_kernel_cuda(min_x, max_x, min_y, max_y, image, max_iter, palette, samples):
-    height, width, _ = image.shape
+def mandelbrot_kernel_cuda(min_x, max_x, min_y, max_y, iter_buf, max_iter, samples):
+    height, width = iter_buf.shape
     pixel_size_x = (max_x - min_x) / float(width)
     pixel_size_y = (max_y - min_y) / float(height)
 
@@ -103,10 +83,7 @@ def mandelbrot_kernel_cuda(min_x, max_x, min_y, max_y, image, max_iter, palette,
 
     for x in range(startX, width, gridX):
         for y in range(startY, height, gridY):
-            r_accum = 0.0
-            g_accum = 0.0
-            b_accum = 0.0
-
+            accum = 0.0
             for sx in range(samples):
                 for sy in range(samples):
                     offset_x = (sx + 0.5) / samples
@@ -133,41 +110,21 @@ def mandelbrot_kernel_cuda(min_x, max_x, min_y, max_y, image, max_iter, palette,
                     nu = math.log(log_zn / math.log(2.0)) / math.log(2.0)
                     smooth_iter = (i + 1) - nu if i < max_iter else i
 
-                    norm = smooth_iter / float(max_iter)
-                    norm = max(0.0, min(1.0, norm))
+                    accum += smooth_iter / max_iter
 
-                    idx_f = norm * 255.0
-                    idx = int(idx_f)
-                    idx_next = min(idx + 1, 255)
-                    t = idx_f - idx
-
-                    base_idx0 = idx * 3
-                    base_idx1 = idx_next * 3
-
-                    r = (1.0 - t) * palette[base_idx0 + 0] + t * palette[base_idx1 + 0]
-                    g = (1.0 - t) * palette[base_idx0 + 1] + t * palette[base_idx1 + 1]
-                    b = (1.0 - t) * palette[base_idx0 + 2] + t * palette[base_idx1 + 2]
-
-                    r_accum += r
-                    g_accum += g
-                    b_accum += b
-
-            total_samples = samples * samples
-            image[y, x, 0] = int(r_accum / total_samples)
-            image[y, x, 1] = int(g_accum / total_samples)
-            image[y, x, 2] = int(b_accum / total_samples)
+            iter_buf[y, x] = accum / (samples * samples)
 
 # --------------------------------------------------------
 # ---------------------- CPU KERNEL ---------------------
 # --------------------------------------------------------
 @njit(parallel=True, fastmath=True)
-def mandelbrot_kernel_cpu(real_grid, imag_grid, width, height, max_iter, samples, palette):
-    img = np.zeros((height, width, 3), dtype=np.uint8)
+def mandelbrot_kernel_cpu(real_grid, imag_grid, width, height, max_iter, samples):
+    iter_buf = np.zeros((height, width), dtype=np.float32)
     eps = 1e-20
 
     for y in prange(height):
         for x in range(width):
-            r_accum = g_accum = b_accum = 0.0
+            accum = 0.0
             for sx in range(samples):
                 for sy in range(samples):
                     offset_x = (sx + 0.5) / samples
@@ -178,14 +135,11 @@ def mandelbrot_kernel_cpu(real_grid, imag_grid, width, height, max_iter, samples
                                 imag_grid[1, 0] - imag_grid[0, 0])
 
                     i = 0
-                    for i in range(max_iter):
-                        zr2 = zr * zr
-                        zi2 = zi * zi
-                        if zr2 + zi2 >= 4.0:
-                            break
-                        temp = zr2 - zi2 + real_grid[y, x]
+                    while zr * zr + zi * zi <= 4.0 and i < max_iter:
+                        temp = zr * zr - zi * zi + real_grid[y, x]
                         zi = 2.0 * zr * zi + imag_grid[y, x]
                         zr = temp
+                        i += 1
 
                     mag2 = zr * zr + zi * zi
                     if mag2 < eps:
@@ -195,31 +149,8 @@ def mandelbrot_kernel_cpu(real_grid, imag_grid, width, height, max_iter, samples
                     nu = math.log(log_zn / math.log(2.0)) / math.log(2.0)
                     smooth_iter = (i + 1) - nu if i < max_iter else i
 
-                    norm = smooth_iter / max_iter
-                    norm = max(0.0, min(1.0, norm))
+                    accum += smooth_iter / max_iter
 
-                    idx_f = norm * 255.0
-                    idx = int(idx_f)
-                    idx_next = min(idx + 1, 255)
-                    t = idx_f - idx
+            iter_buf[y, x] = accum / (samples * samples)
 
-                    base_idx0 = idx * 3
-                    base_idx1 = idx_next * 3
-
-                    r = (1.0 - t) * palette[base_idx0 + 0] + t * palette[
-                        base_idx1 + 0]
-                    g = (1.0 - t) * palette[base_idx0 + 1] + t * palette[
-                        base_idx1 + 1]
-                    b = (1.0 - t) * palette[base_idx0 + 2] + t * palette[
-                        base_idx1 + 2]
-
-                    r_accum += r
-                    g_accum += g
-                    b_accum += b
-
-            total_samples = samples * samples
-            img[y, x, 0] = int(r_accum / total_samples)
-            img[y, x, 1] = int(g_accum / total_samples)
-            img[y, x, 2] = int(b_accum / total_samples)
-
-    return img
+    return iter_buf

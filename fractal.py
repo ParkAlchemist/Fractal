@@ -4,26 +4,34 @@ from numba import cuda
 import pyopencl as cl
 
 from utils import clear_cache_lock, available_backends
-from kernel import (mandelbrot_kernel_cl,
-                    mandelbrot_kernel_cuda,
+from kernel import (mandelbrot_kernel_cl_float,
+                    mandelbrot_kernel_cl_double,
+                    mandelbrot_kernel_cuda_f32,
+                    mandelbrot_kernel_cuda_f64,
                     mandelbrot_kernel_cpu,
+                    mandelbrot_kernel_cpu_mp,
                     Kernel)
 
+class Precisions:
+    single = np.float32
+    double = np.float64
+    arbitrary = 0
 
 # --------------------------------------------------------
 # ------------------------ CLASS -------------------------
 # --------------------------------------------------------
 class Mandelbrot:
     def __init__(self, kernel=Kernel.AUTO, img_width=800, img_height=600,
-                 max_iter=1000, precision="float32", enable_timing=False, samples=2):
+                 max_iter=1000, precision=Precisions.single, enable_timing=False, samples=2, zoom_factor=250):
 
         self.width = img_width
         self.height = img_height
         self.max_iter = max_iter
-        self.precision = np.float32 if precision == "float32" else np.float64
+        self.precision = precision
         self.enable_timing = enable_timing
         self.kernel = kernel
         self.samples = samples
+        self.zoom_factor = zoom_factor
 
         # Kernel warm up params
         self.wu_min_x = -2.0
@@ -35,7 +43,9 @@ class Mandelbrot:
         self.wu_width = 256
         self.wu_height = 256
         self.cpu_warmed_up = False
-        self.cuda_warmed_up = False
+        self.cpu_mp_warmed_up = False
+        self.cuda_f32_warmed_up = False
+        self.cuda_f64_warmed_up = False
 
         # Auto mode: select available backend opencl -> cuda -> cpu
         if self.kernel == Kernel.AUTO:
@@ -56,15 +66,15 @@ class Mandelbrot:
     # ----------------------------------------------
     def _init_kernel(self):
         # Init backend
-        if self.kernel == Kernel.OPENCL:
+        if self.kernel == Kernel.OPENCL and self.precision != Precisions.arbitrary:
             self._init_opencl()
             self.render = self._render_opencl
             print("Using OpenCL backend.")
-        elif self.kernel == Kernel.CUDA:
+        elif self.kernel == Kernel.CUDA and self.precision != Precisions.arbitrary:
             self._init_cuda()
             self.render = self._render_cuda
             print("Using CUDA backend.")
-        elif self.kernel == Kernel.CPU:
+        elif self.kernel == Kernel.CPU or self.precision == Precisions.arbitrary:
             self._init_cpu()
             self.render = self._render_cpu
             print("Using CPU backend.")
@@ -106,14 +116,17 @@ class Mandelbrot:
             raise RuntimeError(f"OpenCL initialization failed: {e}")
 
         # Allocate buffers
-        self.iter_np = np.zeros(self.width * self.height, dtype=np.float32)
+        self.iter_np = np.zeros(self.width * self.height, dtype=self.precision)
         self.iter_buf = cl.Buffer(self.context,
                                    cl.mem_flags.WRITE_ONLY | cl.mem_flags.COPY_HOST_PTR,
                                    self.iter_np.nbytes,
                                    hostbuf=self.iter_np)
 
         # Build program
-        self.program = cl.Program(self.context, mandelbrot_kernel_cl).build()
+        if self.precision == Precisions.single:
+            self.program = cl.Program(self.context, mandelbrot_kernel_cl_float).build()
+        elif self.precision == Precisions.double:
+            self.program = cl.Program(self.context, mandelbrot_kernel_cl_double).build()
 
         # Store kernel
         self.kernel_prog = cl.Kernel(self.program, "mandelbrot_kernel")
@@ -124,7 +137,7 @@ class Mandelbrot:
             raise RuntimeError("CUDA not available on this system.")
 
         self.iter_gpu = cuda.device_array((self.height, self.width),
-                                           dtype=np.float32)
+                                           dtype=self.precision)
         self.threads_per_block = (16, 16)
 
         self.blocks_per_grid = (
@@ -135,49 +148,50 @@ class Mandelbrot:
         print(f"CUDA block size: {self.threads_per_block}, grid size: {self.blocks_per_grid}")
 
         # Warm up
-        if self.cuda_warmed_up: return
+        if self.cuda_f32_warmed_up and self.cuda_f64_warmed_up: return
         print("Warming up CUDA kernel...")
-        mandelbrot_kernel_cuda[self.blocks_per_grid, self.threads_per_block](
+        if self.precision == Precisions.single:
+            self.cuda_kernel = mandelbrot_kernel_cuda_f32
+            self.cuda_f32_warmed_up = True
+        elif self.precision == Precisions.double:
+            self.cuda_kernel = mandelbrot_kernel_cuda_f64
+            self.cuda_f64_warmed_up = True
+
+        self.cuda_kernel[self.blocks_per_grid, self.threads_per_block](
             self.precision(self.wu_min_x), self.precision(self.wu_max_x),
             self.precision(self.wu_min_y), self.precision(self.wu_max_y),
             self.iter_gpu, np.int32(self.wu_max_iter),
             np.int32(self.wu_samples)
         )
         print("Warmed up!")
-        self.cuda_warmed_up = True
 
     # ---------------- Init CPU --------------------
     def _init_cpu(self):
-        if self.cpu_warmed_up: return
+        if self.cpu_warmed_up and self.cpu_mp_warmed_up: return
+
         print("Warming up CPU kernel...")
-        real = np.linspace(self.wu_min_x, self.wu_max_x,
-                           self.wu_width, dtype=self.precision)
-        imag = np.linspace(self.wu_min_y, self.wu_max_y,
-                           self.wu_height, dtype=self.precision)
-        real_grid, imag_grid = np.meshgrid(real, imag)
-        mandelbrot_kernel_cpu(real_grid, imag_grid,
-                              self.wu_width, self.wu_height,
-                              self.wu_max_iter, self.wu_samples)
+        if self.precision != Precisions.arbitrary:
+            real = np.linspace(self.wu_min_x, self.wu_max_x,
+                               self.wu_width, dtype=self.precision)
+            imag = np.linspace(self.wu_min_y, self.wu_max_y,
+                               self.wu_height, dtype=self.precision)
+            real_grid, imag_grid = np.meshgrid(real, imag)
+            mandelbrot_kernel_cpu(real_grid, imag_grid,
+                                  self.wu_width, self.wu_height,
+                                  self.wu_max_iter, self.wu_samples, self.precision)
+            self.cpu_warmed_up = True
+        else:
+            width, height = 10, 10
+            min_x, max_x = -0.743643887037151, -0.743643887037151 + 1e-12
+            min_y, max_y = 0.13182590420533, 0.13182590420533 + 1e-12
+            zoom_factor = 1e12
+
+            mandelbrot_kernel_cpu_mp(min_x, max_x, min_y, max_y,
+                                      width,
+                                      height, max_iter=1000, samples=1,
+                                      zoom_factor=zoom_factor)
+            self.cpu_mp_warmed_up = True
         print("Warmed up!")
-        self.cpu_warmed_up = True
-
-    # ---------------- CUDA RENDER ----------------
-    def _render_cuda(self, min_x, max_x, min_y, max_y):
-        start = time.time() if self.enable_timing else None
-
-        mandelbrot_kernel_cuda[self.blocks_per_grid, self.threads_per_block](
-            self.precision(min_x), self.precision(max_x),
-            self.precision(min_y), self.precision(max_y),
-            self.iter_gpu, np.int32(self.max_iter),
-            np.int32(self.samples)
-        )
-        cuda.synchronize()
-        result = self.iter_gpu.copy_to_host()
-
-        if self.enable_timing:
-            print(f"CUDA render time: {time.time() - start:.3f}s")
-
-        return result
 
     # ---------------- OPENCL RENDER ----------------
     def _render_opencl(self, min_x, max_x, min_y, max_y):
@@ -206,16 +220,42 @@ class Mandelbrot:
 
         return self.iter_np.reshape((self.height, self.width))
 
+    # ---------------- CUDA RENDER ----------------
+    def _render_cuda(self, min_x, max_x, min_y, max_y):
+        start = time.time() if self.enable_timing else None
+
+        self.cuda_kernel[
+            self.blocks_per_grid, self.threads_per_block](
+            self.precision(min_x), self.precision(max_x),
+            self.precision(min_y), self.precision(max_y),
+            self.iter_gpu, np.int32(self.max_iter),
+            np.int32(self.samples)
+        )
+        cuda.synchronize()
+        result = self.iter_gpu.copy_to_host()
+
+        if self.enable_timing:
+            print(f"CUDA render time: {time.time() - start:.3f}s")
+
+        return result
+
     # ---------------- CPU RENDER -------------------
     def _render_cpu(self, min_x, max_x, min_y, max_y):
         start = time.time() if self.enable_timing else None
 
-        real = np.linspace(min_x, max_x, self.width, dtype=self.precision)
-        imag = np.linspace(min_y, max_y, self.height, dtype=self.precision)
-        real_grid, imag_grid = np.meshgrid(real, imag)
-        img = mandelbrot_kernel_cpu(real_grid, imag_grid,
-                                    self.width, self.height,
-                                    self.max_iter, self.samples)
+        img = None
+        if self.precision != Precisions.arbitrary:
+            real = np.linspace(min_x, max_x, self.width, dtype=self.precision)
+            imag = np.linspace(min_y, max_y, self.height, dtype=self.precision)
+            real_grid, imag_grid = np.meshgrid(real, imag)
+            img = mandelbrot_kernel_cpu(real_grid, imag_grid,
+                                        self.width, self.height,
+                                        self.max_iter, self.samples, self.precision)
+        else:
+            img = mandelbrot_kernel_cpu_mp(min_x, max_x, min_y, max_y,
+                                           self.width, self.height,
+                                           self.max_iter, self.samples,
+                                           self.zoom_factor)
         if self.enable_timing:
             print(f"CPU render time: {time.time() - start:.3f}s")
         return img
@@ -225,18 +265,18 @@ class Mandelbrot:
         self.width = width
         self.height = height
 
-        if self.kernel == Kernel.OPENCL:
+        if self.kernel == Kernel.OPENCL and self.precision != Precisions.arbitrary:
             self.iter_np = np.zeros(self.width * self.height,
-                                     dtype=np.float32)
+                                     dtype=self.precision)
             if hasattr(self, "iter_buf"):
                 self.iter_buf.release()
             self.iter_buf = cl.Buffer(self.context,
                                        cl.mem_flags.WRITE_ONLY | cl.mem_flags.COPY_HOST_PTR,
                                        self.iter_np.nbytes,
                                        hostbuf=self.iter_np)
-        elif self.kernel == Kernel.CUDA:
+        elif self.kernel == Kernel.CUDA and self.precision != Precisions.arbitrary:
             self.iter_gpu = cuda.device_array((self.height, self.width),
-                                               dtype=np.float32)
+                                               dtype=self.precision)
 
     # ---------------- Kernel Change ----------------
     def change_kernel(self, new_kernel):
@@ -250,6 +290,20 @@ class Mandelbrot:
         self.kernel = new_kernel
         self._init_kernel()
         print(f"Kernel switched to {self.kernel.name} successfully.")
+
+
+    # ---------------- Precision change --------------------
+    def change_precision(self, new_precison):
+        if new_precison == self.precision:
+            return
+
+        # Cleanup
+        self.close()
+
+        # Init new kernel
+        self.precision = new_precison
+        self._init_kernel()
+        print(f"Precision changed to {self.precision.name} successfully.")
 
     # ---------------- CLEANUP ----------------
     def close(self):
@@ -284,3 +338,21 @@ class Mandelbrot:
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.close()
+
+
+if __name__ == "__main__":
+    from mpmath import mp
+    # Test with a small image and deep zoom
+
+    width, height = 64, 64
+    min_x, max_x = -0.743643887037151, -0.743643887037151 + 1e-10
+    min_y, max_y = 0.13182590420533, 0.13182590420533 + 1e-10
+    zoom_factor = 1e10
+
+    result = mandelbrot_kernel_cpu_mp(min_x, max_x, min_y, max_y,
+                                               width, height, max_iter=500,
+                                               samples=1,
+                                               zoom_factor=zoom_factor)
+    print("Parallel arbitrary precision Mandelbrot computed for 64x64 region at zoom 1e10.")
+    print("Precision digits:", mp.dps)
+    print("Sample output:", result[:2, :2])

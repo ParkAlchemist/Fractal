@@ -2,8 +2,9 @@ import numpy as np
 from PyQt5.QtCore import pyqtSignal, QObject, QThread
 from PyQt5.QtGui import QImage
 
-from fractal import Mandelbrot
+from fractal import Mandelbrot, Precisions
 from kernel import Kernel
+from palettes import palettes
 
 
 class ColoringMode:
@@ -50,17 +51,17 @@ class FullImageRenderer(QObject):
     image_updated = pyqtSignal(QImage)
 
     def __init__(self, width, height, palette, kernel=Kernel.AUTO,
-                 max_iter=200, samples=2, coloring_mode=ColoringMode.HYBRID,
-                 interior_color=(100, 100, 100)):
+                 max_iter=200, samples=2, coloring_mode=ColoringMode.EXTERIOR, precision=Precisions.single):
         super().__init__()
         self.width = width
         self.height = height
         self.kernel = kernel
         self.max_iter = max_iter
         self.samples = samples
-        self.palette = np.array(palette, dtype=np.uint8)
+        self.exter_palette = np.array(palette, dtype=np.uint8)
+        self.inter_palette = self.exter_palette
         self.coloring_mode = coloring_mode
-        self.interior_color = np.array(interior_color, dtype=np.uint8)
+        self.precision = precision
 
         self._iter_buf = None
         self._viewport = None
@@ -114,34 +115,39 @@ class FullImageRenderer(QObject):
     def _apply_palette(self):
         h, w = self._iter_buf.shape
         rgb = np.zeros((h, w, 3), dtype=np.uint8)
-        palette_size = len(self.palette)
+        exter_palette_size = len(self.exter_palette)
+        inter_palette_size = len(self.inter_palette)
 
         # Mask for interior points
-        interior_mask = self._iter_buf >= 0.999
+        interior_mask = self._iter_buf >= 0.999 # threshold for interior
         exterior_mask = ~interior_mask
 
         # Handle exterior points
         if self.coloring_mode in (ColoringMode.EXTERIOR, ColoringMode.HYBRID):
             vals = self._iter_buf[exterior_mask]
-            idx_f = vals * (palette_size - 1)
-            idx = np.clip(idx_f.astype(np.int32), 0, palette_size - 1)
+            idx_f = vals * (exter_palette_size - 1)
+            idx = np.clip(idx_f.astype(np.int32), 0, exter_palette_size - 1)
             t = idx_f - idx
-            idx_next = np.clip(idx + 1, 0, palette_size - 1)
+            idx_next = np.clip(idx + 1, 0, exter_palette_size - 1)
 
-            colors0 = self.palette[idx]
-            colors1 = self.palette[idx_next]
+            colors0 = self.exter_palette[idx]
+            colors1 = self.exter_palette[idx_next]
             blended = ((1 - t)[:, None] * colors0 + t[:, None] * colors1).astype(np.uint8)
             rgb[exterior_mask] = blended
 
         # Handle interior points
         if self.coloring_mode in (ColoringMode.INTERIOR, ColoringMode.HYBRID):
             if np.any(interior_mask):
-                y_coords, x_coords = np.where(interior_mask)
-                cx, cy = w / 2.0, h / 2.0
-                dist = np.sqrt((x_coords - cx)**2 + (y_coords - cy)**2)
-                dist_norm = dist / dist.max() if dist.max() > 0 else dist
-                gradient_colors = (self.interior_color * (1 - dist_norm[:, None])).astype(np.uint8)
-                rgb[interior_mask] = gradient_colors
+                vals = self._iter_buf[interior_mask]
+                idx_f = vals * (inter_palette_size - 1)
+                idx = np.clip(idx_f.astype(np.int32), 0, inter_palette_size - 1)
+                t = idx_f - idx
+                idx_next = np.clip(idx + 1, 0, inter_palette_size - 1)
+
+                colors0 = self.inter_palette[idx]
+                colors1 = self.inter_palette[idx_next]
+                blended = ((1 - t)[:, None] * colors0 + t[:, None] * colors1).astype(np.uint8)
+                rgb[interior_mask] = blended
 
         return rgb
 
@@ -156,14 +162,14 @@ class FullImageRenderer(QObject):
         self._iter_buf = None
         self.mandelbrot.change_kernel(new_kernel)
 
-    def set_palette(self, palette):
-        self.palette = np.array(palette, dtype=np.uint8)
+    def set_exter_palette(self, name):
+        self.exter_palette = np.array(palettes[name], dtype=np.uint8)
+
+    def set_inter_palette(self, name):
+        self.inter_palette = np.array(palettes[name], dtype=np.uint8)
 
     def set_coloring_mode(self, mode):
         self.coloring_mode = mode
-
-    def set_interior_color(self, color):
-        self.interior_color = np.array(color, dtype=np.uint8)
 
     def set_max_iter(self, new_max):
         self.max_iter = new_max
@@ -180,3 +186,14 @@ class FullImageRenderer(QObject):
         self.height = height
         self.mandelbrot.change_image_size(width, height)
         self._iter_buf = None
+
+    def set_precision(self, new_precision):
+        if new_precision == self.precision:
+            return
+
+        self.precision = new_precision
+        self.mandelbrot.change_precision(new_precision)
+        self._iter_buf = None
+
+    def set_zoom_factor(self, zoom_factor):
+        self.mandelbrot.zoom_factor = zoom_factor

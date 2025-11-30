@@ -10,6 +10,7 @@ from PyQt5.QtCore import Qt, QTimer, QPropertyAnimation, QEasingCurve
 
 from palettes import palettes
 from render import FullImageRenderer, ColoringMode
+from fractal import Precisions
 from kernel import Kernel
 from utils import available_backends
 
@@ -18,7 +19,7 @@ class MandelbrotViewer(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Mandelbrot Viewer")
-        self.window_height = 720
+        self.window_height = 900
         self.aspect_ratio = 16/9
         self.window_width = int(self.window_height * self.aspect_ratio)
         self.setGeometry(100, 100, self.window_width, self.window_height)
@@ -54,8 +55,7 @@ class MandelbrotViewer(QMainWindow):
         self.start_center_y = None
 
         # Palette
-        self.palette_name = "Classic"
-        self.palette = palettes[self.palette_name]
+        self.default_palette_name = "Classic"
 
         # Image
         self.cached_image = None
@@ -107,7 +107,7 @@ class MandelbrotViewer(QMainWindow):
         # Max iter
         self.iter_input = QComboBox()
         self.iter_input.addItems(["100", "200", "500", "1000", "2000", "5000"])
-        self.iter_input.setCurrentText("1000")
+        self.iter_input.setCurrentText("200")
         render_layout.addRow("Max Iterations: ", self.iter_input)
 
         # Samples
@@ -132,7 +132,7 @@ class MandelbrotViewer(QMainWindow):
         self.radio_exterior = QRadioButton("Exterior")
         self.radio_interior = QRadioButton("Interior")
         self.radio_hybrid = QRadioButton("Hybrid")
-        self.radio_hybrid.setChecked(True)  # Default
+        self.radio_exterior.setChecked(True)  # Default
 
         self.coloring_mode_group.addButton(self.radio_exterior)
         self.coloring_mode_group.addButton(self.radio_interior)
@@ -146,12 +146,19 @@ class MandelbrotViewer(QMainWindow):
         self.radio_interior.toggled.connect(lambda checked: checked and self.change_coloring_mode(ColoringMode.INTERIOR))
         self.radio_hybrid.toggled.connect(lambda checked: checked and self.change_coloring_mode(ColoringMode.HYBRID))
 
-        # Palette
-        self.palette_input = QComboBox()
-        self.palette_input.addItems(palettes.keys())
-        self.palette_input.setCurrentText(self.palette_name)
-        self.palette_input.currentTextChanged.connect(self.change_palette)
-        palette_layout.addRow(self.palette_input)
+        # Exterior Palette
+        self.exter_palette_input = QComboBox()
+        self.exter_palette_input.addItems(palettes.keys())
+        self.exter_palette_input.setCurrentText(self.default_palette_name)
+        self.exter_palette_input.currentTextChanged.connect(self.change_exter_palette)
+        palette_layout.addRow("Exterior Palette: ", self.exter_palette_input)
+
+        # Interior Palette
+        self.inter_palette_input = QComboBox()
+        self.inter_palette_input.addItems(palettes.keys())
+        self.inter_palette_input.setCurrentText(self.default_palette_name)
+        self.inter_palette_input.currentTextChanged.connect(self.change_inter_palette)
+        palette_layout.addRow("Interior Palette: ", self.inter_palette_input)
 
         palette_tab.setLayout(palette_layout)
 
@@ -184,6 +191,43 @@ class MandelbrotViewer(QMainWindow):
         tabs.addTab(render_tab, "Render")
         tabs.addTab(palette_tab, "Palette")
         tabs.addTab(view_tab, "View")
+
+    # ----------- Rendering ---------------
+    def render_fractal(self):
+        width = self.label.width()
+        height = self.label.height()
+        if width == 0 or height == 0:
+            return
+
+        if self.renderer is None:
+            self.renderer = FullImageRenderer(width, height,
+                                              palettes[
+                                                  self.default_palette_name],
+                                              kernel=Kernel.AUTO,
+                                              max_iter=200, samples=2,
+                                              coloring_mode=ColoringMode.EXTERIOR,
+                                              precision=Precisions.single)
+            self.renderer.image_updated.connect(self.update_image)
+
+        scale = 1.0 / self.zoom
+        min_x = self.center_x - (width / 2) * scale
+        max_x = self.center_x + (width / 2) * scale
+        min_y = self.center_y - (height / 2) * scale
+        max_y = self.center_y + (height / 2) * scale
+
+        # Update precision
+        zoom_factor = self.zoom
+        if zoom_factor > 1e14:
+            precision_mode = Precisions.arbitrary
+        elif zoom_factor > 1e6:
+            precision_mode = Precisions.double
+        else:
+            precision_mode = Precisions.single
+
+        self.renderer.set_precision(precision_mode)
+        self.renderer.set_zoom_factor(zoom_factor)
+
+        self.renderer.render_frame(min_x, max_x, min_y, max_y)
 
 
     # ---------- Tab Actions -----------------
@@ -235,11 +279,14 @@ class MandelbrotViewer(QMainWindow):
             self.zoom_input.setText(str(self.zoom))
 
     # --------------- Palette update -----------------
-    def change_palette(self, name):
-        self.palette_name = name
-        self.palette = palettes[name]
+    def change_exter_palette(self, name):
         if self.renderer:
-            self.renderer.set_palette(self.palette)
+            self.renderer.set_exter_palette(name)
+        self.render_fractal()
+
+    def change_inter_palette(self, name):
+        if self.renderer:
+            self.renderer.set_inter_palette(name)
         self.render_fractal()
 
     # -------------- Save Image ------------------
@@ -252,27 +299,6 @@ class MandelbrotViewer(QMainWindow):
             )
             if path:
                 self.cached_image.save(path)
-
-    # ----------- Render ---------------
-    def render_fractal(self):
-        width = self.label.width()
-        height = self.label.height()
-        if width == 0 or height == 0:
-            return
-
-        if self.renderer is None:
-            self.renderer = FullImageRenderer(width, height,
-                                              self.palette, kernel=Kernel.AUTO,
-                                              max_iter=1000, samples=2)
-            self.renderer.image_updated.connect(self.update_image)
-
-        scale = 1.0 / self.zoom
-        min_x = self.center_x - (width / 2) * scale
-        max_x = self.center_x + (width / 2) * scale
-        min_y = self.center_y - (height / 2) * scale
-        max_y = self.center_y + (height / 2) * scale
-
-        self.renderer.render_frame(min_x, max_x, min_y, max_y)
 
     # ------------ View Update ---------------
     def update_image(self, image):
@@ -371,6 +397,18 @@ class MandelbrotViewer(QMainWindow):
         max_x = cx + (self.label.width() / 2) * scale
         min_y = cy - (self.label.height() / 2) * scale
         max_y = cy + (self.label.height() / 2) * scale
+
+        # Update precision
+        if zoom > 1e14:
+            precision_mode = Precisions.arbitrary
+        elif zoom > 1e6:
+            precision_mode = Precisions.double
+        else:
+            precision_mode = Precisions.single
+
+        self.renderer.set_precision(precision_mode)
+        self.renderer.set_zoom_factor(zoom)
+
         self.renderer.render_frame(min_x, max_x, min_y, max_y)
 
     def _perform_anim_step(self):

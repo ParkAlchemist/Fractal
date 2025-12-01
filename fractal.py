@@ -303,7 +303,7 @@ class Mandelbrot:
         # Init new kernel
         self.precision = new_precison
         self._init_kernel()
-        print(f"Precision changed to {self.precision.name} successfully.")
+        print(f"Precision changed to {self.precision} successfully.")
 
     # ---------------- CLEANUP ----------------
     def close(self):

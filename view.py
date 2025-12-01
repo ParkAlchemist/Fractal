@@ -1,10 +1,11 @@
 import sys
+import time
 from datetime import datetime
 
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QLabel, QVBoxLayout, QWidget,
     QPushButton, QComboBox, QFileDialog, QHBoxLayout, QDockWidget, QTabWidget,
-    QFormLayout, QLineEdit, QSizePolicy, QRadioButton, QButtonGroup)
+    QFormLayout, QLineEdit, QSizePolicy, QRadioButton, QButtonGroup, QCheckBox)
 from PyQt5.QtGui import QPixmap, QPainter, QImage
 from PyQt5.QtCore import Qt, QTimer, QPropertyAnimation, QEasingCurve
 
@@ -14,6 +15,12 @@ from fractal import Precisions
 from kernel import Kernel
 from utils import available_backends
 
+
+class Tools:
+    Drag = 0
+    Click_zoom = 1
+    Wheel_zoom = 2
+    Set_center = 3
 
 class MandelbrotViewer(QMainWindow):
     def __init__(self):
@@ -45,8 +52,8 @@ class MandelbrotViewer(QMainWindow):
         self.start_x = self.start_y = self.start_zoom = 0
         self.target_x = self.target_y = self.target_zoom = 0
         self.final_render_pending = False
-        self.mouse_focus_x = 0
-        self.mouse_focus_y = 0
+        self.anim_fps = 60
+        self.anim_interval = int((1 / self.anim_fps) * 1000)
 
         # Drag state
         self.dragging = False
@@ -76,6 +83,35 @@ class MandelbrotViewer(QMainWindow):
         save_button = QPushButton("Save Image")
         save_button.clicked.connect(self.save_image)
         controls.addWidget(save_button)
+
+        # Tools
+        tools = QHBoxLayout()
+
+        # Drag
+        self.drag_tool = QCheckBox("Drag tool")
+        self.drag_tool.setChecked(False)
+        tools.addWidget(self.drag_tool)
+        self.drag_tool.clicked.connect(lambda checked: checked and self.set_tools(Tools.Drag))
+
+        # Click zoom
+        self.click_zoom_tool = QCheckBox("Click-Zoom tool")
+        self.click_zoom_tool.setChecked(False)
+        tools.addWidget(self.click_zoom_tool)
+        self.click_zoom_tool.clicked.connect(lambda checked: checked and self.set_tools(Tools.Click_zoom))
+
+        # Wheel zoom
+        self.wheel_zoom_tool = QCheckBox("Wheel-Zoom tool")
+        self.wheel_zoom_tool.setChecked(False)
+        tools.addWidget(self.wheel_zoom_tool)
+        self.wheel_zoom_tool.clicked.connect(lambda checked: checked and self.set_tools(Tools.Wheel_zoom))
+
+        # Set center
+        self.set_center_tool = QCheckBox("Set-Center tool")
+        self.set_center_tool.setChecked(False)
+        tools.addWidget(self.set_center_tool)
+        self.set_center_tool.clicked.connect(lambda checked: checked and self.set_tools(Tools.Set_center))
+
+        layout.addLayout(tools)
 
         layout.addLayout(controls)
         container = QWidget()
@@ -230,6 +266,7 @@ class MandelbrotViewer(QMainWindow):
         self.renderer.render_frame(min_x, max_x, min_y, max_y)
 
 
+
     # ---------- Tab Actions -----------------
     def apply_render_settings(self):
         if self.renderer:
@@ -269,14 +306,34 @@ class MandelbrotViewer(QMainWindow):
             self.zoom = float(self.zoom_input.text())
             self.zoom_factor = float(self.zoom_factor_input.text())
             self.render_fractal()
-        except ValueError:
-            pass
+        except ValueError as e:
+            print(f"Error in view inputs: {e}")
 
     def update_view_tab_fields(self):
         if hasattr(self, "center_x_input") and hasattr(self, "center_y_input") and hasattr(self, "zoom_input"):
             self.center_x_input.setText(str(self.center_x))
             self.center_y_input.setText(str(self.center_y))
             self.zoom_input.setText(str(self.zoom))
+
+    def set_tools(self, tool: Tools):
+        if tool == Tools.Drag:
+            self.drag_tool.setChecked(True)
+            self.click_zoom_tool.setChecked(False)
+            self.set_center_tool.setChecked(False)
+        if tool == Tools.Click_zoom:
+            self.click_zoom_tool.setChecked(True)
+            self.drag_tool.setChecked(False)
+            self.wheel_zoom_tool.setChecked(False)
+            self.set_center_tool.setChecked(False)
+        if tool == Tools.Wheel_zoom:
+            self.wheel_zoom_tool.setChecked(True)
+            self.click_zoom_tool.setChecked(False)
+        if tool == Tools.Set_center:
+            self.set_center_tool.setChecked(True)
+            self.drag_tool.setChecked(False)
+            self.click_zoom_tool.setChecked(False)
+
+        print(f"Selected tool {tool}.")
 
     # --------------- Palette update -----------------
     def change_exter_palette(self, name):
@@ -360,36 +417,25 @@ class MandelbrotViewer(QMainWindow):
         self.fade_anim = anim
         anim.start()
 
-    # ---------------- Zoom Animation ----------------
-    def wheelEvent(self, event):
-        if not self.label.geometry().contains(event.pos()):
+    def update_view(self):
+        if not getattr(self, "cached_image", None):
             return
-
-        zoom_in = event.angleDelta().y() > 0
-        zoom_factor = self.zoom_factor if zoom_in else (1 / self.zoom_factor)
-        mouse_pos = event.pos()
-
-        self.mouse_focus_x = mouse_pos.x()
-        self.mouse_focus_y = mouse_pos.y()
-
-        self.target_zoom = self.zoom * zoom_factor
-        self.target_x = self.center_x + (mouse_pos.x() - self.label.width() / 2) / self.zoom
-        self.target_y = self.center_y + (mouse_pos.y() - self.label.height() / 2) / self.zoom
 
         # Start final render immediately
         self._start_final_render(self.target_x, self.target_y, self.target_zoom)
 
         # Prepare animation
         self.start_x, self.start_y, self.start_zoom = self.center_x, self.center_y, self.zoom
+
         self.update_view_tab_fields()
-        self.phase = 0 if zoom_in else 1
+        self.phase = 0 if self.target_zoom > self.zoom else 1
         self.current_step = 0
 
         if self.animation_timer is None:
             self.animation_timer = QTimer()
             self.animation_timer.timeout.connect(self._perform_anim_step)
 
-        self.animation_timer.start(16)  # ~60 FPS
+        self.animation_timer.start(self.anim_interval)
 
     def _start_final_render(self, cx, cy, zoom):
         scale = 1.0 / zoom
@@ -466,6 +512,10 @@ class MandelbrotViewer(QMainWindow):
         painter.end()
         self.label.setPixmap(final_pixmap)
 
+        self.center_x = interp_x
+        self.center_y = interp_y
+        self.update_view_tab_fields()
+
     def _zoom_step(self, eased_t, pixmap):
         interp_zoom = self.start_zoom + (
                     self.target_zoom - self.start_zoom) * eased_t
@@ -486,17 +536,51 @@ class MandelbrotViewer(QMainWindow):
         painter.end()
         self.label.setPixmap(final_pixmap)
 
+        self.zoom = interp_zoom
+        self.update_view_tab_fields()
+
+    # ---------------- Wheel zoom ----------------
+    def wheelEvent(self, event):
+        if not self.label.geometry().contains(event.pos()):
+            return
+
+        if not self.wheel_zoom_tool.isChecked():
+            return
+
+        zoom_in = event.angleDelta().y() > 0
+        zoom_factor = self.zoom_factor if zoom_in else (1 / self.zoom_factor)
+        mouse_pos = event.pos()
+
+        self.target_zoom = self.zoom * zoom_factor
+        self.target_x = self.center_x + (mouse_pos.x() - self.label.width() / 2) / self.zoom
+        self.target_y = self.center_y + (mouse_pos.y() - self.label.height() / 2) / self.zoom
+
+        self.update_view()
+
     # ---------------- Panning ----------------
     def mousePressEvent(self, event):
-        if event.button() == Qt.LeftButton:
-            if self.label.geometry().contains(event.pos()):
-                self.dragging = True
-                self.last_mouse_pos = event.pos()
-                self.start_center_x = self.center_x
-                self.start_center_y = self.center_y
+        if self.label.geometry().contains(event.pos()):
+            mouse_pos = event.pos()
+            self.target_x = self.center_x + (mouse_pos.x() - self.label.width() / 2) / self.zoom
+            self.target_y = self.center_y + (mouse_pos.y() - self.label.height() / 2) / self.zoom
+            if event.button() == Qt.LeftButton:
+                if self.drag_tool.isChecked():
+                    self.dragging = True
+                    self.last_mouse_pos = event.pos()
+                    self.start_center_x = self.center_x
+                    self.start_center_y = self.center_y
+                if self.set_center_tool.isChecked():
+                    self.update_view()
+                if self.click_zoom_tool.isChecked():
+                    self.target_zoom = self.zoom * self.zoom_factor
+                    self.update_view()
+            if event.button() == Qt.RightButton:
+                if self.click_zoom_tool.isChecked():
+                    self.target_zoom = self.zoom / self.zoom_factor
+                    self.update_view()
 
     def mouseMoveEvent(self, event):
-        if self.dragging and self.cached_image:
+        if self.dragging and self.cached_image and self.drag_tool.isChecked():
             dx = event.x() - self.last_mouse_pos.x()
             dy = event.y() - self.last_mouse_pos.y()
 
@@ -522,9 +606,10 @@ class MandelbrotViewer(QMainWindow):
             self.update_view_tab_fields()
 
     def mouseReleaseEvent(self, event):
-        if event.button() == Qt.LeftButton and self.dragging:
+        if event.button() == Qt.LeftButton and self.dragging and self.drag_tool.isChecked():
             self.dragging = False
             self.cached_image = QImage(self.label.pixmap())
+            self.target_x, self.target_y = self.center_x, self.center_y
             self.render_fractal()
 
     # -------------- Window Actions -----------------

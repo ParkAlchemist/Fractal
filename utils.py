@@ -1,4 +1,7 @@
 import os
+
+import numpy as np
+from mpmath import mp
 from numba import cuda
 import pyopencl as cl
 
@@ -134,3 +137,20 @@ def available_backends():
         backends.append(Kernel.CUDA.name)
     backends.append(Kernel.CPU.name)
     return backends
+
+def make_reference_orbit_hp(c_ref: complex, max_iter: int, mp_dps: int = 100):
+    """
+        Compute reference orbit z*_n for n=0..max_iter-1 at high precision,
+        then return as a float64 NumPy array (real, imag).
+    """
+    mp.dps = mp_dps
+    c = mp.mpc(c_ref.real, c_ref.imag)
+    z = mp.mpc(0, 0)
+    zref = np.empty((max_iter, 2), dtype=np.float64)
+    for n in range(max_iter):
+        # store
+        zref[n, 0] = float(z.real)
+        zref[n, 1] = float(z.imag)
+        # iterate
+        z = z * z + c
+    return zref

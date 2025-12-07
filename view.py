@@ -1,5 +1,4 @@
 import sys
-import time
 from datetime import datetime
 
 from PyQt5.QtWidgets import (
@@ -22,10 +21,10 @@ class Tools:
     Wheel_zoom = 2
     Set_center = 3
 
-class MandelbrotViewer(QMainWindow):
+class FractalViewer(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Mandelbrot Viewer")
+        self.setWindowTitle("Fractal Viewer")
         self.window_height = 900
         self.aspect_ratio = 16/9
         self.window_width = int(self.window_height * self.aspect_ratio)
@@ -315,7 +314,7 @@ class MandelbrotViewer(QMainWindow):
             self.center_y_input.setText(str(self.center_y))
             self.zoom_input.setText(str(self.zoom))
 
-    def set_tools(self, tool: Tools):
+    def set_tools(self, tool):
         if tool == Tools.Drag:
             self.drag_tool.setChecked(True)
             self.click_zoom_tool.setChecked(False)
@@ -641,7 +640,7 @@ class MandelbrotViewer(QMainWindow):
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
-    viewer = MandelbrotViewer()
+    viewer = FractalViewer()
     viewer.show()
     viewer.render_fractal()
     sys.exit(app.exec_())

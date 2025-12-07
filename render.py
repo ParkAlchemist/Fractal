@@ -60,6 +60,7 @@ class FullImageRenderer(QObject):
         self.samples = samples
         self.exter_palette = np.array(palette, dtype=np.uint8)
         self.inter_palette = self.exter_palette
+        self.inter_color = (100, 100, 100)
         self.coloring_mode = coloring_mode
         self.precision = precision
 
@@ -138,16 +139,12 @@ class FullImageRenderer(QObject):
         # Handle interior points
         if self.coloring_mode in (ColoringMode.INTERIOR, ColoringMode.HYBRID):
             if np.any(interior_mask):
-                vals = self._iter_buf[interior_mask]
-                idx_f = vals * (inter_palette_size - 1)
-                idx = np.clip(idx_f.astype(np.int32), 0, inter_palette_size - 1)
-                t = idx_f - idx
-                idx_next = np.clip(idx + 1, 0, inter_palette_size - 1)
-
-                colors0 = self.inter_palette[idx]
-                colors1 = self.inter_palette[idx_next]
-                blended = ((1 - t)[:, None] * colors0 + t[:, None] * colors1).astype(np.uint8)
-                rgb[interior_mask] = blended
+                y_coords, x_coords = np.where(interior_mask)
+                cx, cy = w / 2.0, h / 2.0
+                dist = np.sqrt((x_coords - cx) ** 2 + (y_coords - cy) ** 2)
+                dist_norm = dist / dist.max() if dist.max() > 0 else dist
+                gradient_colors = (self.inter_color * (1 - dist_norm[:, None])).astype(np.uint8)
+                rgb[interior_mask] = gradient_colors
 
         return rgb
 

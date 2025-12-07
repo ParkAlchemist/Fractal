@@ -1,8 +1,0 @@
-Hardware Summary
-CPU,"Intel64 Family 6 Model 158 Stepping 10, GenuineIntel"
-GPU,NVIDIA GeForce GTX 1050
-
-Resolution,CPU Time (s),CPU FPS,CUDA Time (s),CUDA FPS,OpenCL Time (s),OpenCL FPS
-800x600,0.253,3.95,0.072,13.84,0.020,49.28
-1280x720,0.483,2.07,0.109,9.21,0.038,26.45
-1920x1080,1.086,0.92,0.255,3.92,0.085,11.70

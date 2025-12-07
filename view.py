@@ -1,6 +1,7 @@
 import sys
 from datetime import datetime
 
+import numpy as np
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QLabel, QVBoxLayout, QWidget,
     QPushButton, QComboBox, QFileDialog, QHBoxLayout, QDockWidget, QTabWidget,
@@ -9,17 +10,9 @@ from PyQt5.QtGui import QPixmap, QPainter, QImage
 from PyQt5.QtCore import Qt, QTimer, QPropertyAnimation, QEasingCurve
 
 from palettes import palettes
-from render import FullImageRenderer, ColoringMode
-from fractal import Precisions
-from kernel import Kernel
+from render import FullImageRenderer
+from enums import Kernel, ColoringMode, EngineMode, Tools, Precisions
 from utils import available_backends
-
-
-class Tools:
-    Drag = 0
-    Click_zoom = 1
-    Wheel_zoom = 2
-    Set_center = 3
 
 class FractalViewer(QMainWindow):
     def __init__(self):
@@ -151,6 +144,24 @@ class FractalViewer(QMainWindow):
         self.samples_input.setCurrentText("2")
         render_layout.addRow("Samples: ", self.samples_input)
 
+        # Use Perturbation
+        self.use_perturb_chk = QCheckBox("Use perturbation")
+        self.use_perturb_chk.setChecked(False)
+        render_layout.addRow(self.use_perturb_chk)
+
+        # Perturbation order
+        self.perturb_order_input = QComboBox()
+        self.perturb_order_input.addItems(["1", "2"])
+        self.perturb_order_input.setCurrentText("2")
+        render_layout.addRow("Perturbation order:", self.perturb_order_input)
+
+        # Tile rendering
+        self.tile_render_check = QCheckBox("Tile rendering")
+        self.tile_render_check.setChecked(False)
+        render_layout.addRow(self.tile_render_check)
+        self.tile_size_input = QLineEdit("256x256")
+        render_layout.addRow("Tile size (WxH):", self.tile_size_input)
+
         # Apply button
         apply_render_btn = QPushButton("Apply")
         apply_render_btn.clicked.connect(self.apply_render_settings)
@@ -236,12 +247,11 @@ class FractalViewer(QMainWindow):
 
         if self.renderer is None:
             self.renderer = FullImageRenderer(width, height,
-                                              palettes[
-                                                  self.default_palette_name],
+                                              palettes[self.default_palette_name],
                                               kernel=Kernel.AUTO,
                                               max_iter=200, samples=2,
                                               coloring_mode=ColoringMode.EXTERIOR,
-                                              precision=Precisions.single)
+                                              precision=np.float32)
             self.renderer.image_updated.connect(self.update_image)
 
         scale = 1.0 / self.zoom
@@ -253,14 +263,13 @@ class FractalViewer(QMainWindow):
         # Update precision
         zoom_factor = self.zoom
         if zoom_factor > 1e14:
-            precision_mode = Precisions.arbitrary
+            precision_mode = Precisions.Arbitrary
         elif zoom_factor > 1e6:
-            precision_mode = Precisions.double
+            precision_mode = Precisions.Double
         else:
-            precision_mode = Precisions.single
+            precision_mode = Precisions.Single
 
         self.renderer.set_precision(precision_mode)
-        self.renderer.set_zoom_factor(zoom_factor)
 
         self.renderer.render_frame(min_x, max_x, min_y, max_y)
 
@@ -276,6 +285,22 @@ class FractalViewer(QMainWindow):
                 self.renderer.set_max_iter(max_iter)
             if self.renderer.samples != samples:
                 self.renderer.set_samples(samples)
+
+            # Perturbation
+            use_perturb = self.use_perturb_chk.isChecked()
+            perturb_order = int(self.perturb_order_input.currentText())
+            self.renderer.set_use_perturb(use_perturb, order=perturb_order,
+                                          thresh=1e-6, hp_dps=160)
+            # Engine
+            if self.tile_render_check.isChecked():
+                try:
+                    tw, th = map(int, self.tile_size_input.text().lower().replace(' ', '').split('x'))
+                except Exception:
+                    tw, th = 256, 256
+                self.renderer.set_engine_mode(EngineMode.TILED,
+                                              tile_w=tw, tile_h=th)
+            else:
+                self.renderer.set_engine_mode(EngineMode.FULL_FRAME)
 
             kernel_str = self.kernel_input.currentText()
             if kernel_str == "OPENCL":
@@ -445,14 +470,13 @@ class FractalViewer(QMainWindow):
 
         # Update precision
         if zoom > 1e14:
-            precision_mode = Precisions.arbitrary
+            precision_mode = Precisions.Arbitrary
         elif zoom > 1e6:
-            precision_mode = Precisions.double
+            precision_mode = Precisions.Double
         else:
-            precision_mode = Precisions.single
+            precision_mode = Precisions.Single
 
         self.renderer.set_precision(precision_mode)
-        self.renderer.set_zoom_factor(zoom)
 
         self.renderer.render_frame(min_x, max_x, min_y, max_y)
 

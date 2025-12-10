@@ -22,7 +22,7 @@ class FractalViewer(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Fractal Viewer")
-        self.window_height = 900
+        self.window_height = 1080
         self.aspect_ratio = 16 / 9
         self.window_width = int(self.window_height * self.aspect_ratio)
         self.setGeometry(100, 100, self.window_width, self.window_height)
@@ -37,7 +37,7 @@ class FractalViewer(QMainWindow):
         self.center_x = -0.5
         self.center_y = 0.0
         self.zoom = 250.0
-        self.zoom_factor = 1.5
+        self.zoom_factor = 2
 
         # Animation state
         self.animation_timer = None
@@ -156,7 +156,7 @@ class FractalViewer(QMainWindow):
         self.tile_render_check.setChecked(False)
         render_layout.addRow(self.tile_render_check)
 
-        self.tile_size_input = QLineEdit("256x256")
+        self.tile_size_input = QLineEdit("512x512")
         render_layout.addRow("Tile size (WxH):", self.tile_size_input)
 
         apply_render_btn = QPushButton("Apply")
@@ -778,6 +778,7 @@ class FractalViewer(QMainWindow):
             self.dragging = False
             self.target_x, self.target_y = self.center_x, self.center_y
             self.target_zoom = self.zoom
+            self.view_image = self.label.pixmap().toImage().copy()
             self.render_fractal()
 
     # ----------------------- Window actions -----------------------
@@ -855,7 +856,6 @@ class FractalViewer(QMainWindow):
         if self.tile_flush_timer.isActive():
             self.tile_flush_timer.stop()
         self.cached_image = None
-        # composite_image stays; reinitialized on demand
 
 
 if __name__ == "__main__":

@@ -12,7 +12,7 @@ from coloring.smooth_escape import SmoothEscapeColoring
 from fractals.fractal_base import Viewport, RenderSettings
 from fractals.mandelbrot import MandelbrotFractal
 from renderers.renderer_core import Renderer
-from renderers.render_engines import FullFrameEngine, TileEngine
+from renderers.render_engines import FullFrameEngine, TileEngine, AdaptiveTileEngine
 
 # --- Workers ---------------------------------------------------------------
 
@@ -157,8 +157,22 @@ class FullImageRenderer(QObject):
             self._worker.start()
 
         elif self.engine_mode == EngineMode.TILED:
+            """
             self.renderer.set_engine(TileEngine(tile_w=self.tile_w, tile_h=self.tile_h,
                                                 per_tile_reference=True))
+            """
+            self.renderer.set_engine(AdaptiveTileEngine(
+                min_tile=32,
+                max_tile=self.tile_w,
+                target_ms=16.0,
+                max_depth=4,
+                priority="center-first",
+                sample_stride=8,
+                parallel=True,                  # enable concurrency
+                max_workers=0,                  # 0 -> auto (cpu count)
+                parallel_for_cpu_only=True,     # parallelize CPU by default
+                per_tile_reference=False        # reuse frame level reference for speed
+            ))
             self._iter_canvas = np.zeros((self.height, self.width), dtype=self.precision)
             self._render_seq += 1
             self._worker = ProgressiveTileRenderWorker(self.renderer, vp, self._render_seq)

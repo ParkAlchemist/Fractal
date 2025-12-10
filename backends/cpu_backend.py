@@ -1,7 +1,6 @@
-
-# --- Reference backends/cpu_backend.py v1.0 --------------------------------
 import numpy as np
 from typing import Dict, Any, Optional
+
 from fractals.fractal_base import Fractal, Viewport, RenderSettings
 from backends.backend_base import Backend
 from kernel_sources.cpu.mandelbrot import (

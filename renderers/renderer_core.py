@@ -1,5 +1,6 @@
 import numpy as np
 from typing import Optional
+
 from fractals.fractal_base import Fractal, Viewport, RenderSettings
 from backends.backend_base import Backend
 from renderers.render_engines import BaseRenderEngine, FullFrameEngine

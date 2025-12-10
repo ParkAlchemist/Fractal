@@ -2,6 +2,7 @@ import numpy as np
 import pyopencl as cl
 import threading
 from typing import Dict, Any, Optional
+
 from utils import clear_cache_lock
 from fractals.fractal_base import Fractal, Viewport, RenderSettings
 from backends.backend_base import Backend
@@ -105,12 +106,19 @@ class OpenClBackend(Backend):
             queue.finish()
         finally:
             try: out_buf.release()
-            except Exception: pass
+            except Exception as e:
+                print("Error when releasing output buffer: ", e)
+                pass
+
             if zref_r_buf is not None:
                 try: zref_r_buf.release()
-                except Exception: pass
+                except Exception as e:
+                    print("Error when releasing zref_r buffer: ", e)
+                    pass
             if zref_i_buf is not None:
                 try: zref_i_buf.release()
-                except Exception: pass
+                except Exception as e:
+                    print("Error when releasing zref_i buffer: ", e)
+                    pass
 
         return out_np.reshape((vp.height, vp.width))

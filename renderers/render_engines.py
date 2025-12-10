@@ -1,6 +1,7 @@
 from abc import ABC, abstractmethod
 from typing import Optional, Dict, Any, Callable
 import numpy as np
+
 from fractals.fractal_base import Fractal, Viewport, RenderSettings
 
 class BaseRenderEngine(ABC):

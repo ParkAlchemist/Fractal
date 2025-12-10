@@ -1,8 +1,7 @@
-
-# --- Reference backends/cuda_backend.py v1.0 --------------------------------
 import numpy as np
 from typing import Dict, Any, Optional
 from numba import cuda
+
 from fractals.fractal_base import Fractal, Viewport, RenderSettings
 from backends.backend_base import Backend
 from kernel_sources.cuda.mandelbrot import (

@@ -1,6 +1,3 @@
-
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """
 Benchmark the modular fractal renderer (CPU / CUDA / OpenCL).
 Supports full-frame and tile engines, perturbation, and f32/f64 precision.
@@ -23,7 +20,7 @@ from typing import List, Tuple, Optional
 
 import numpy as np
 
-# --- Our architecture imports ------------------------------------------------
+# --- Architecture imports ----------------------------------------------------
 from fractals.fractal_base import Viewport, RenderSettings
 from fractals.mandelbrot import MandelbrotFractal
 from renderers.renderer_core import Renderer
@@ -37,14 +34,16 @@ try:
     from backends.cuda_backend import CudaBackend
     import numba.cuda as cuda
     CUDA_AVAILABLE = cuda.is_available()
-except Exception:
+except Exception as e:
+    print(f"Cuda not available: {e}")
     CUDA_AVAILABLE = False
 
 # OpenCL hardened backend (robust on Windows drivers)
 try:
     from backends.opencl_backend import OpenClBackend as OclBackend
     OCL_AVAILABLE = True
-except Exception:
+except Exception as e:
+    print(f"OpenCL not available: {e}")
     OCL_AVAILABLE = False
 
 # --- Helpers -----------------------------------------------------------------

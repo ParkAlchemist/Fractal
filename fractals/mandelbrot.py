@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 from typing import Dict, Any, Optional
 import numpy as np
+
 from fractals.fractal_base import Fractal, Viewport, RenderSettings
 from utils import make_reference_orbit_hp
 

@@ -1,4 +1,5 @@
 import numpy as np
+
 from enums import ColoringMode
 from coloring.base import ColoringStrategy
 

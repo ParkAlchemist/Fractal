@@ -23,8 +23,8 @@ import numpy as np
 # --- Architecture imports ----------------------------------------------------
 from fractals.fractal_base import Viewport, RenderSettings
 from fractals.mandelbrot import MandelbrotFractal
-from renderers.renderer_core import Renderer
-from renderers.render_engines import FullFrameEngine, TileEngine
+from rendering.renderer_core import Renderer
+from rendering.render_engines import FullFrameEngine, TileEngine
 
 from backends.backend_base import Backend
 from backends.cpu_backend import CpuBackend

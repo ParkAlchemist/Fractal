@@ -1,7 +1,10 @@
+import threading
+
 import numpy as np
 import time
 from PyQt5.QtCore import pyqtSignal, QObject, QThread
 from PyQt5.QtGui import QImage
+
 from enums import Kernel, ColoringMode, EngineMode, Precisions
 from palettes import palettes
 from utils import available_backends, ndarray_to_qimage
@@ -11,8 +14,8 @@ from backends.cuda_backend import CudaBackend
 from coloring.smooth_escape import SmoothEscapeColoring
 from fractals.fractal_base import Viewport, RenderSettings
 from fractals.mandelbrot import MandelbrotFractal
-from renderers.renderer_core import Renderer
-from renderers.render_engines import FullFrameEngine, TileEngine, AdaptiveTileEngine
+from rendering.renderer_core import Renderer
+from rendering.render_engines import FullFrameEngine, TileEngine, AdaptiveTileEngine
 
 # --- Workers ---------------------------------------------------------------
 
@@ -47,6 +50,7 @@ class ProgressiveTileRenderWorker(QThread):
         self.viewport = viewport
         self.seq = seq
         self._stop = False
+        self.tile_lock = threading.Lock()
 
     def stop(self):
         self._stop = True
@@ -63,12 +67,13 @@ class ProgressiveTileRenderWorker(QThread):
             return self._stop
 
         def on_tile(x0, y0, tile):
-            h, w = tile.shape
-            canvas[y0:y0 + h, x0:x0 + w] = tile
-            self.tile_done.emit(x0, y0, w, h, tile, self.seq)
+            with self.tile_lock:
+                h, w = tile.shape
+                canvas[y0:y0 + h, x0:x0 + w] = tile
+                self.tile_done.emit(x0, y0, w, h, tile, self.seq)
 
         engine.on_tile = on_tile
-        engine.render(fractal, backend, settings, self.viewport, reference=None, cancel_cb=cancel_cb)
+        engine.render(fractal, backend, settings, self.viewport, cancel_cb=cancel_cb)
 
         if not self._stop:
             self.finished_frame.emit(canvas, self.seq)
@@ -78,8 +83,8 @@ class ProgressiveTileRenderWorker(QThread):
 
 class FullImageRenderer(QObject):
     image_updated = pyqtSignal(QImage)                 # final full frame / full-frame mode
-    tile_ready   = pyqtSignal(int, int, int, QImage)   # (gen_id, x, y, tile QImage)
-    log_text     = pyqtSignal(str)
+    tile_ready = pyqtSignal(int, int, int, QImage)   # (gen_id, x, y, tile QImage)
+    log_text = pyqtSignal(str)
 
     def __init__(self, width, height, palette, kernel=Kernel.AUTO,
                  max_iter=200, samples=2, coloring_mode=ColoringMode.EXTERIOR,
@@ -110,7 +115,7 @@ class FullImageRenderer(QObject):
         self.fractal = MandelbrotFractal()
         self.backend = self._select_backend(kernel)
         self.settings = RenderSettings(max_iter=max_iter, samples=samples,
-                                       precision=self.precision, use_perturb=False)
+                                       precision=self.precision)
         self.renderer = Renderer(self.fractal, self.backend, self.settings, engine=FullFrameEngine())
 
         self._worker = None
@@ -118,10 +123,6 @@ class FullImageRenderer(QObject):
         self._render_seq = 0
         self._start_time = None
         self._stop_flag = False
-
-        # Legacy fields (unused with tile-queue UI)
-        self._rgb_canvas = None
-        self._use_base = False
 
     # -- Backend selection
     @staticmethod
@@ -140,6 +141,7 @@ class FullImageRenderer(QObject):
             self._worker.stop()
             self._worker.wait()
 
+        # If viewport unchanged and we have a buffer, just re-color
         if self._viewport == (min_x, max_x, min_y, max_y) and self._iter_buf is not None:
             self.render_image()
             return
@@ -157,22 +159,6 @@ class FullImageRenderer(QObject):
             self._worker.start()
 
         elif self.engine_mode == EngineMode.TILED:
-            """
-            self.renderer.set_engine(TileEngine(tile_w=self.tile_w, tile_h=self.tile_h,
-                                                per_tile_reference=True))
-            """
-            self.renderer.set_engine(AdaptiveTileEngine(
-                min_tile=32,
-                max_tile=self.tile_w,
-                target_ms=16.0,
-                max_depth=4,
-                priority="center-first",
-                sample_stride=8,
-                parallel=True,                  # enable concurrency
-                max_workers=0,                  # 0 -> auto (cpu count)
-                parallel_for_cpu_only=True,     # parallelize CPU by default
-                per_tile_reference=False        # reuse frame level reference for speed
-            ))
             self._iter_canvas = np.zeros((self.height, self.width), dtype=self.precision)
             self._render_seq += 1
             self._worker = ProgressiveTileRenderWorker(self.renderer, vp, self._render_seq)
@@ -204,7 +190,7 @@ class FullImageRenderer(QObject):
         self._iter_canvas[y0:y0 + h, x0:x0 + w] = tile_iter.astype(self.precision)
 
         # Colorize just the tile and emit it; deep copy for thread safety
-        tile_rgb  = self.coloring.apply(tile_iter.astype(np.float64), self.coloring_mode,
+        tile_rgb  = self.coloring.apply(tile_iter.astype(self.precision), self.coloring_mode,
                                         self.exter_palette, self.inter_palette,
                                         interior_color=self.inter_color)
         tile_qimg = ndarray_to_qimage(tile_rgb).copy()
@@ -241,12 +227,6 @@ class FullImageRenderer(QObject):
     def set_coloring_mode(self, mode):
         self.coloring_mode = mode
 
-    def set_base_image(self, base_img: QImage):
-        # No-op in the tile-queue UI pipeline
-        self._rgb_canvas = None
-        self._use_base = False
-        return
-
     def set_max_iter(self, new_max):
         self.max_iter = new_max
         self._iter_buf = None
@@ -266,7 +246,6 @@ class FullImageRenderer(QObject):
         self.height = height
         self._iter_buf = None
         self._iter_canvas = None
-        self._rgb_canvas = None
         self.stop()
 
     def set_precision(self, new_precision_mode):
@@ -282,16 +261,29 @@ class FullImageRenderer(QObject):
         self.renderer = Renderer(self.fractal, self.backend, self.settings, engine=self.renderer.engine)
         self.stop()
 
-    def set_engine_mode(self, mode, tile_w: int = None, tile_h: int = None):
+    def set_engine_mode(self, mode, tile_w: int = None, tile_h: int = None, adaptive_opts: dict = None):
         self.engine_mode = mode
         if tile_w: self.tile_w = int(tile_w)
         if tile_h: self.tile_h = int(tile_h)
         self.stop()
 
-    def set_use_perturb(self, use: bool, order: int = 2, thresh: float = 1e-6, hp_dps: int = 160):
-        self.settings.use_perturb = bool(use)
-        self.settings.perturb_order = int(order)
-        self.settings.perturb_thresh = float(thresh)
-        self.settings.hp_dps = int(hp_dps)
+        if self.engine_mode == EngineMode.FULL_FRAME:
+            self.renderer.set_engine(FullFrameEngine())
+
+        elif self.engine_mode == EngineMode.TILED:
+            if adaptive_opts:
+                self.renderer.set_engine(AdaptiveTileEngine(
+                    min_tile=adaptive_opts.get("min_tile", 64),
+                    max_tile=adaptive_opts.get("max_tile", self.tile_w),
+                    target_ms=adaptive_opts.get("target_ms", 12.0),
+                    max_depth=adaptive_opts.get("max_depth", 4),
+                    sample_stride=adaptive_opts.get("sample_stride", 8),
+                    parallel=adaptive_opts.get("parallel", True),
+                    max_workers=adaptive_opts.get("max_workers", 0),
+                    on_tile=None
+                ))
+            else:
+                self.renderer.set_engine(TileEngine(tile_w=self.tile_w, tile_h=self.tile_h))
+
         self.renderer = Renderer(self.fractal, self.backend, self.settings, engine=self.renderer.engine)
         self.stop()

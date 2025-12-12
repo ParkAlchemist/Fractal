@@ -56,10 +56,10 @@ def make_reference_orbit_hp(c_ref: complex, max_iter: int, mp_dps: int = 160):
 
 def qimage_to_ndarray(img: QImage, require_copy: bool = True) -> np.ndarray:
     """
-        Convert a QImage to a NumPy ndarray with shape (h, w, c) where c ∈ {1,3,4},
-        handling stride and common QImage formats. Returns a copy by default to avoid
-        lifetime issues; set require_copy=False to get a view (unsafe if QImage changes).
-        """
+    Convert a QImage to a NumPy ndarray with shape (h, w, c) where c ∈ {1,3,4},
+    handling stride and common QImage formats. Returns a copy by default to avoid
+    lifetime issues; set require_copy=False to get a view (unsafe if QImage changes).
+    """
     if img is None or img.isNull():
         raise ValueError("qimage_to_ndarray: input QImage is null")
 
@@ -123,9 +123,9 @@ def qimage_to_ndarray(img: QImage, require_copy: bool = True) -> np.ndarray:
 
 def ndarray_to_qimage(arr: np.ndarray) -> QImage:
     """
-        Convert an ndarray of shape (h,w), (h,w,1), (h,w,3) [RGB], or (h,w,4) [RGBA]
-        into a QImage. Returns a QImage that owns its memory (deep copy).
-        """
+    Convert a ndarray of shape (h,w), (h,w,1), (h,w,3) [RGB], or (h,w,4) [RGBA]
+    into a QImage. Returns a QImage that owns its memory (deep copy).
+    """
     if arr.ndim == 2:
         h, w = arr.shape
         qimg = QImage(arr.data.tobytes(), w, h, w, QImage.Format_Grayscale8)
@@ -149,3 +149,26 @@ def ndarray_to_qimage(arr: np.ndarray) -> QImage:
             return qimg.copy()
 
     raise ValueError(f"Unsupported ndarray shape {arr.shape}")
+
+
+def qimage_to_np_gray(img: QImage) -> np.ndarray:
+    """Convert QImage (RGB32/ARGB32) to normalized luminance [0,1]."""
+    w, h = img.width(), img.height()
+    ptr = img.bits()
+    ptr.setsize(img.byteCount())
+    arr = np.frombuffer(ptr, dtype=np.uint8).reshape(h, img.bytesPerLine() // 4, 4)
+    # BGRA or ARGB; take channels robustly
+    r = arr[..., 2].astype(np.float32)
+    g = arr[..., 1].astype(np.float32)
+    b = arr[..., 0].astype(np.float32)
+    # simple luminance
+    gray = (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255.0
+    return gray
+
+def gradient_mag(gray: np.ndarray) -> np.ndarray:
+    """Cheap gradient magnitude using 1st differences."""
+    gx = np.zeros_like(gray)
+    gy = np.zeros_like(gray)
+    gx[:, 1:-1] = (gray[:, 2:] - gray[:, :-2]) * 0.5
+    gy[1:-1, :] = (gray[2:, :] - gray[:-2, :]) * 0.5
+    return np.sqrt(gx*gx + gy*gy)

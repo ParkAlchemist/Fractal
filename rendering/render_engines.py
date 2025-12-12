@@ -1,14 +1,15 @@
 import os
 import time
-import math
-import heapq
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from abc import ABC, abstractmethod
-from typing import Optional, Dict, Any, Callable
+from typing import Optional, Callable
 import numpy as np
 
 from fractals.fractal_base import Fractal, Viewport, RenderSettings
+from rendering.tilescheduler import TileScheduler, TileInfo
+from rendering.tilescorer import TileScorer
+
 
 class BaseRenderEngine(ABC):
     def __init__(self, on_tile: Optional[Callable[[int, int, np.ndarray], None]] = None):
@@ -16,24 +17,22 @@ class BaseRenderEngine(ABC):
 
     @abstractmethod
     def render(self, fractal: Fractal, backend, settings: RenderSettings,
-               vp: Viewport, reference: Optional[Dict[str, Any]] = None,
+               vp: Viewport,
                cancel_cb: Optional[Callable[[], bool]] = None) -> np.ndarray:
         ...
 
 class FullFrameEngine(BaseRenderEngine):
     def render(self, fractal: Fractal, backend, settings: RenderSettings,
-               vp: Viewport, reference: Optional[Dict[str, Any]] = None,
+               vp: Viewport,
                cancel_cb: Optional[Callable[[], bool]] = None) -> np.ndarray:
-        return backend.render(fractal, vp, settings, reference)
+        return backend.render(fractal, vp, settings)
 
 class TileEngine(BaseRenderEngine):
     def __init__(self, tile_w: int = 256, tile_h: int = 256,
-                 per_tile_reference: bool = True,
                  on_tile: Optional[Callable[[int, int, np.ndarray], None]] = None):
         super().__init__(on_tile)
         self.tile_w = int(tile_w)
         self.tile_h = int(tile_h)
-        self.per_tile_reference = per_tile_reference
         self.center_out = True
 
     def _tile_viewports(self, vp: Viewport):
@@ -60,17 +59,14 @@ class TileEngine(BaseRenderEngine):
             yield x0, y0, sub_vp
 
     def render(self, fractal: Fractal, backend, settings: RenderSettings,
-               vp: Viewport, reference: Optional[Dict[str, Any]] = None,
+               vp: Viewport,
                cancel_cb: Optional[Callable[[], bool]] = None) -> np.ndarray:
         canvas = np.zeros((vp.height, vp.width), dtype=settings.precision)
         for x0, y0, sub_vp in self._tile_viewports(vp):
             if cancel_cb is not None and cancel_cb(): break
-            ref = None
-            if settings.use_perturb and self.per_tile_reference and fractal.supports_perturbation():
-                ref = fractal.build_reference(sub_vp, settings)
-            tile = backend.render(fractal, sub_vp, settings, ref)
+            tile = backend.render(fractal, sub_vp, settings)
             canvas[y0:y0+sub_vp.height, x0:x0+sub_vp.width] = tile
-            if self.on_tile is not None:
+            if callable(self.on_tile):
                 self.on_tile(x0, y0, tile)
         return canvas
 
@@ -79,50 +75,82 @@ class AdaptiveTileEngine(BaseRenderEngine):
     Dynamic tiling via quadtree + priority queue.
     - Starts with coarse tiles (max_tile).
     - Measures cost & variance, then splits expensive tiles (2x2).
-    - Prioritizes center-first by default.
+    - Prioritization handled by TileScheduler
     - Can run sequentially or with a thread pool for parallel speed.
 
     Signals:
       on_tile(x0, y0, tile_iters) is called whenever a tile finishes.
     """
 
-    def __init__(self, min_tile: int = 64, max_tile: int = 512,
-                 target_ms: float = 12.0, max_depth: int = 4,
-                 priority="center-first", sample_stride: int = 8,
+    def __init__(self,
+                 min_tile: int = 64,
+                 max_tile: int = 512,
+                 target_ms: float = 12.0,
+                 max_depth: int = 4,
+                 sample_stride: int = 8,
                  on_tile: Optional[Callable[[int, int, np.ndarray], None]] = None,
-                 parallel: bool = True, max_workers: int = 0,
-                 parallel_for_cpu_only: bool = True,
-                 per_tile_reference: bool = False):
+                 parallel: bool = True,
+                 max_workers: int = 0,
+                 parallel_for_cpu_only: bool = True):
         super().__init__(on_tile)
-        self.min_tile = min_tile
-        self.max_tile = max_tile
-        self.target_ms = target_ms
-        self.max_depth = max_depth
-        self.priority = priority
-        self.sample_stride = sample_stride
+        self.min_tile = int(min_tile)
+        self.max_tile = int(max_tile)
+        self.target_ms = float(target_ms)
+        self.max_depth = int(max_depth)
+        self.sample_stride = int(sample_stride)
 
         # Concurrency controls
-        self.parallel = parallel
-        self.per_tile_reference = per_tile_reference
-        self.max_workers = max_workers
-        self.parallel_for_cpu_only = parallel_for_cpu_only
+        self.parallel = bool(parallel)
+        self.max_workers = int(max_workers)
+        self.parallel_for_cpu_only = bool(parallel_for_cpu_only)
+
+        # Motion state
+        self._last_viewport: Optional[Viewport] = None
+
+        # Weights
+        weights_motion = {
+            'vis': 1.0,
+            'center': 0.5,
+            'area': 0.7,
+            'motion': 1.0,
+            'age': 0.2,
+            'var': 0.2,
+            'bnd': 0.2
+        }
+        weights_idle = {
+            'vis': 1.0,
+            'center': 0.7,
+            'area': 0.6,
+            'motion': 0.1,
+            'age': 0.3,
+            'var': 0.8,
+            'bnd': 0.6
+        }
+
+        self.scorer = TileScorer(weights_motion=weights_motion,
+                                 weights_idle=weights_idle)
+        self.scheduler = TileScheduler(self.scorer)
+
 
     # ----------- Render entry point -----------------------------------------
     def render(self, fractal, backend, settings: RenderSettings,
-               viewport: Viewport, reference: Optional[Dict[str, Any]] = None,
+               viewport: Viewport,
                cancel_cb: Optional[Callable[[], bool]] = None) -> np.ndarray:
         W, H = viewport.width, viewport.height
         canvas = np.zeros((H, W), dtype=settings.precision)
         canvas_lock = threading.Lock()
 
+        self.scheduler.update_view(W, H, viewport, self._last_viewport)
+        self._last_viewport = viewport
+
         # Root tiles: choose a coarse tiling (e.g., 1x1 or 2x2 of max_tile-ish blocks)
         roots = self._seed_root_tiles(W, H, self.max_tile)
 
-        # Priority queue of tiles: (-score, tile_index, tile_info)
-        pq = []
-        for idx, t in enumerate(roots):
-            score = self._tile_priority(t, W, H)
-            heapq.heappush(pq, (-score, idx, t))
+        self.scheduler.clear()
+        now = time.perf_counter()
+        for x0, y0, w, h, depth in roots:
+            ti = TileInfo(x0=x0, y0=y0, w=w, h=h, depth=depth, enqueue_time=now)
+            self.scheduler.enqueue(ti, visible=True)
 
         # Decide concurrency
         backend_name = getattr(backend, "name", "").upper()
@@ -133,78 +161,88 @@ class AdaptiveTileEngine(BaseRenderEngine):
         executor: Optional[ThreadPoolExecutor] = ThreadPoolExecutor(max_workers=workers) if workers > 1 else None
         inflight = set() # track futures
 
+        # Local settings: preview vs refine
+        def make_settings(base: RenderSettings, max_iter: int) -> RenderSettings:
+            s = RenderSettings(max_iter=max_iter, samples=base.samples, precision=base.precision)
+            return s
+
+        def compute_tile(ti: TileInfo, phase: str = None):
+            ti.w = min(ti.w, W - ti.x0)
+            ti.h = min(ti.h, H - ti.y0)
+            if ti.w <= 0 or ti.h <= 0: return ti, None, None
+
+            sub_vp = self._make_sub_viewport(viewport, ti.x0, ti.y0, ti.w, ti.h)
+
+            st = make_settings(settings, settings.max_iter)
+
+            if phase == 'refine':
+                if ti.iteration_variance > 0.5 or ti.boundary_likelihood > 0.5:
+                    st.samples = depth * 2 if depth != 0 else 1
+
+            t0 = time.perf_counter()
+            tile_iters = backend.render(fractal, sub_vp, st)
+            t_ms = (time.perf_counter() - t0) * 1000.0
+
+            with canvas_lock:
+                canvas[ti.y0: ti.y0 + ti.h, ti.x0: ti.x0 + ti.w] = tile_iters
+            if callable(self.on_tile):
+                self.on_tile(ti.x0, ti.y0, tile_iters)
+
+            ti.iteration_variance = self._compute_iteration_variance(tile_iters)
+            ti.boundary_likelihood = self._compute_boundary_likelihood(tile_iters)
+
+            split = (ti.depth < self.max_depth) and self._should_split(tile_iters, t_ms, ti.w, ti.h)
+            return ti, tile_iters, split
+
         try:
-            while pq or inflight:
-                if cancel_cb is not None and cancel_cb(): break
+            while True:
 
-                while pq and (executor is None or len(inflight) < workers):
-                    _, _, tile = heapq.heappop(pq)
-                    x0, y0, w, h, depth = tile
+                if cancel_cb is not None and cancel_cb():
+                    break
 
-                    # Clamp to image bounds
-                    w = min(w, W - x0)
-                    h = min(h, H - y0)
-                    if w <= 0 or h <= 0:
-                        continue
+                popped = self.scheduler.pop_next()
+                if popped is None and not inflight:
+                    break
 
-                    sub_vp = self._make_sub_viewport(viewport, x0, y0, w, h)
+                while popped is not None and (executor is None or len(inflight) < workers):
 
-                    # Pick reference
-                    ref = None
-                    if settings.use_perturb and fractal.supports_perturbation():
-                        if self.per_tile_reference:
-                            # Accurate: per-tile reference
-                            ref = fractal.build_reference(sub_vp, settings)
-                        else:
-                            # Fast: reuse frame level reference
-                            ref = reference
-
-                    def _compute_tile(fr=fractal, be=backend, st=settings, sv=sub_vp, X=x0, Y=y0, Wt=w, Ht=h, D=depth, Re=ref):
-                        t0 = time.perf_counter()
-                        tile_iters = be.render(fr, sv, st, Re)
-                        t_ms = (time.perf_counter() - t0) * 1000.0
-
-                        with canvas_lock:
-                            canvas[Y:Y+Ht, X:X+Wt] = tile_iters
-                        # Emit progressive tile
-                        if callable(self.on_tile):
-                            self.on_tile(X, Y, tile_iters)
-
-                        # Decide refinement
-                        split = (D < self.max_depth) and self._should_split(tile_iters, t_ms, Wt, Ht)
-
-                        return X, Y, Wt, Ht, D, split
-
+                    phase, ti = popped
                     if executor is None:
-                        # Sequential
-                        X, Y, Wt, Ht, D, split = _compute_tile()
+                        ti, _, split = compute_tile(ti, phase)
                         if split:
-                            for child in self._split((X, Y, Wt, Ht, D), W, H):
-                                score2 = self._tile_priority(child, W, H)
-                                heapq.heappush(pq, (-score2, id(child), child))
+                            for child in self._split((ti.x0, ti.y0, ti.w, ti.h, ti.depth), W, H):
+                                cti = TileInfo(x0=child[0], y0=child[1],
+                                               w=child[2], h=child[3],
+                                               depth=child[4],
+                                               enqueue_time=time.perf_counter())
+                                self.scheduler.enqueue(cti, visible=self._visible(cti, W, H))
                     else:
-                        fut = executor.submit(_compute_tile)
+                        fut = executor.submit(compute_tile, ti, phase)
                         inflight.add(fut)
+                    popped = self.scheduler.pop_next()
 
                 if inflight:
                     done, _ = self._wait_some(inflight, timeout=0.05)
                     for fut in done:
                         inflight.discard(fut)
                         try:
-                            X, Y, Wt, Ht, D, split = fut.result()
+                            ti, _, split = fut.result()
                         except Exception as e:
-                            print("Failed to compute tile:", e)
+                            print(f"Failed to compute tile: {e}")
                             continue
                         if split:
-                            for child in self._split((X, Y, Wt, Ht, D), W, H):
-                                score2 = self._tile_priority(child, W, H)
-                                heapq.heappush(pq, (-score2, id(child), child))
-                else:
-                    pass
+                            for child in self._split((ti.x0, ti.y0, ti.w, ti.h, ti.depth), W, H):
+                                cti = TileInfo(x0=child[0], y0=child[1],
+                                               w=child[2], h=child[3],
+                                               depth=child[4],
+                                               enqueue_time=time.perf_counter())
+                                self.scheduler.enqueue(cti, visible=self._visible(cti, W, H))
         finally:
             if executor is not None:
                 executor.shutdown(wait=False)
-            return canvas
+
+        return canvas
+
 
     # ------- Helpers -------------------------------------
     @staticmethod
@@ -237,32 +275,13 @@ class AdaptiveTileEngine(BaseRenderEngine):
         # Round down to nearest multiple of 32
         return max((n // 32) * 32, 32)
 
-    @staticmethod
-    def _tile_priority(tile, W, H):
-        x0, y0, w, h, depth = tile
-        # Center first by default
-        cx, cy = W / 2.0, H / 2.0
-        tx = x0 + w / 2.0
-        ty = y0 + h / 2.0
-        dist = math.hypot(tx - cx, ty - cy)
-        base = 1.0 / (1.0 + dist)
-        # Prefer larger tiles
-        size_bonus = (w * h) / (W * H)
-        # Shallower depth first
-        depth_bonus = 1.0 / (1.0 + depth)
-        return base * 0.7 + size_bonus * 0.2 + depth_bonus * 0.1
-
     def _should_split(self, tile_iters, t_ms, w, h):
         if w <= self.min_tile and h <= self.min_tile:
             return False
 
-        # Time budget heuristic
         time_heavy = t_ms > self.target_ms
-        # Variance heuristic
-        stride = self.sample_stride
-        sample = tile_iters[::stride, ::stride]
-        var = float(np.var(sample))
-        # Combine
+        var = float(np.var(tile_iters[::self.sample_stride, ::self.sample_stride]))
+
         return time_heavy or var > 0.5
 
     def _split(self, tile, W, H):
@@ -295,3 +314,21 @@ class AdaptiveTileEngine(BaseRenderEngine):
         sub_min_y = vp.min_y + (vp.max_y - vp.min_y) * sy
         sub_max_y = vp.min_y + (vp.max_y - vp.min_y) * ey
         return Viewport(sub_min_x, sub_max_x, sub_min_y, sub_max_y, w, h)
+
+    @staticmethod
+    def _visible(ti: TileInfo, W: int, H: int) -> bool:
+        return ti.x0 < W and ti.y0 < H and ti.w > 0 and ti.h > 0
+
+    def _compute_iteration_variance(self, tile_iters: np.ndarray) -> float:
+        sample = tile_iters[::self.sample_stride, ::self.sample_stride]
+        v = float(np.var(sample))
+        return max(0.0, min(1.0, v))
+
+    @staticmethod
+    def _compute_boundary_likelihood(tile_iters: np.ndarray) -> float:
+        total = tile_iters.size
+        if total == 0:
+            return 0.0
+        low, high = 0.3, 0.7
+        mid = np.count_nonzero((tile_iters >= low) & (tile_iters <= high))
+        return max(0.0, min(1.0, mid / total))

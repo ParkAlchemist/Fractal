@@ -1,4 +1,5 @@
 import sys
+import time
 from datetime import datetime
 import numpy as np
 from collections import deque
@@ -72,6 +73,22 @@ class FractalViewer(QMainWindow):
         self.tile_flush_timer = QTimer(self)
         self.tile_flush_timer.setInterval(16)  # ~60 FPS
         self.tile_flush_timer.timeout.connect(self._flush_tile_queue)
+        self.tile_overlay_rects = deque(maxlen=5000)
+
+        # --- Adaptive engine UI state & stats ---
+        self.adaptive_enabled = True
+        self.adaptive_opts = {
+            "min_tile": 64,
+            "max_tile": 256,
+            "target_ms": 12.0,
+            "max_depth": 4,
+            "sample_stride": 8,
+            "parallel": True,
+            "max_workers": 0,  # 0 -> auto
+        }
+        self.show_tile_overlay = True
+        self.tiles_processed = 0
+        self.tiles_start_time = None
 
         self.init_ui()
 
@@ -143,21 +160,50 @@ class FractalViewer(QMainWindow):
         self.samples_input.setCurrentText("2")
         render_layout.addRow("Samples: ", self.samples_input)
 
-        self.use_perturb_chk = QCheckBox("Use perturbation")
-        self.use_perturb_chk.setChecked(False)
-        render_layout.addRow(self.use_perturb_chk)
-
-        self.perturb_order_input = QComboBox()
-        self.perturb_order_input.addItems(["1", "2"])
-        self.perturb_order_input.setCurrentText("2")
-        render_layout.addRow("Perturbation order:", self.perturb_order_input)
-
         self.tile_render_check = QCheckBox("Tile rendering")
         self.tile_render_check.setChecked(False)
         render_layout.addRow(self.tile_render_check)
 
         self.tile_size_input = QLineEdit("512x512")
         render_layout.addRow("Tile size (WxH):", self.tile_size_input)
+
+        # Enable/disable adaptive engine (still respects the "Tile rendering" checkbox)
+        self.adaptive_enable_chk = QCheckBox("Enable Adaptive Tiling")
+        self.adaptive_enable_chk.setChecked(True)
+        self.adaptive_enable_chk.toggled.connect(
+            lambda b: setattr(self, "adaptive_enabled", bool(b)))
+        render_layout.addRow(self.adaptive_enable_chk)
+
+        # Tile size bounds
+        self.min_tile_input = QLineEdit(str(self.adaptive_opts["min_tile"]))
+        self.max_tile_input = QLineEdit(str(self.adaptive_opts["max_tile"]))
+        render_layout.addRow("Min tile (px):", self.min_tile_input)
+        render_layout.addRow("Max tile (px):", self.max_tile_input)
+
+        # Budget / depth / sampling
+        self.target_ms_input = QLineEdit(str(self.adaptive_opts["target_ms"]))
+        self.max_depth_input = QLineEdit(str(self.adaptive_opts["max_depth"]))
+        self.sample_stride_input = QLineEdit(
+            str(self.adaptive_opts["sample_stride"]))
+        render_layout.addRow("Target time per tile (ms):",
+                               self.target_ms_input)
+        render_layout.addRow("Max quadtree depth:", self.max_depth_input)
+        render_layout.addRow("Sample stride:", self.sample_stride_input)
+
+        # Concurrency
+        self.parallel_chk = QCheckBox("Parallel (CPU)")
+        self.parallel_chk.setChecked(self.adaptive_opts["parallel"])
+        self.max_workers_input = QLineEdit(
+            str(self.adaptive_opts["max_workers"]))
+        render_layout.addRow(self.parallel_chk)
+        render_layout.addRow("Max workers (0=auto):", self.max_workers_input)
+
+        # Overlay
+        self.overlay_chk = QCheckBox("Show tile overlay")
+        self.overlay_chk.setChecked(True)
+        self.overlay_chk.toggled.connect(
+            lambda b: setattr(self, "show_tile_overlay", bool(b)))
+        render_layout.addRow(self.overlay_chk)
 
         apply_render_btn = QPushButton("Apply")
         apply_render_btn.clicked.connect(self.apply_render_settings)
@@ -274,6 +320,10 @@ class FractalViewer(QMainWindow):
         log_v.addLayout(log_controls)
         log_v.addWidget(self.log_view)
 
+        self.stats_label = QLabel("Tiles: 0 | Tiles/sec: 0.0")
+        self.stats_label.setStyleSheet("color: #AAB; padding: 2px;")
+        log_v.addWidget(self.stats_label)
+
         self.log_dock.setWidget(log_container)
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.log_dock)
         self.splitDockWidget(self.side_menu, self.log_dock, Qt.Orientation.Vertical)
@@ -319,6 +369,9 @@ class FractalViewer(QMainWindow):
             f"zoom={self.zoom:.6g}, precision={precision_mode.name}."
         )
 
+        self.tiles_start_time = None
+        self.tiles_processed = 0
+
         self._clear_tile_queue()
         self.renderer.render_frame(min_x, max_x, min_y, max_y)
 
@@ -358,11 +411,13 @@ class FractalViewer(QMainWindow):
         # --- Max iterations & samples ---
         try:
             max_iter = int(self.iter_input.currentText())
-        except Exception:
+        except Exception as e:
+            self.log(f"{e}; Invalid max_iter input: {self.iter_input.currentText()}.")
             max_iter = self.renderer.max_iter
         try:
             samples = int(self.samples_input.currentText())
-        except Exception:
+        except Exception as e:
+            self.log(f"{e}; Invalid samples input: {self.samples_input.currentText()}.")
             samples = self.renderer.samples
 
         if self.renderer.max_iter != max_iter:
@@ -373,34 +428,26 @@ class FractalViewer(QMainWindow):
             self.renderer.set_samples(samples)
             self.log(f"Set samples to {samples}.")
 
-        # --- Perturbation settings ---
-        use_perturb = self.use_perturb_chk.isChecked()
-        try:
-            perturb_order = int(self.perturb_order_input.currentText())
-        except Exception:
-            perturb_order = 2
-        self.renderer.set_use_perturb(use_perturb, order=perturb_order,
-                                      thresh=1e-6, hp_dps=160)
-        self.log(
-            f"Perturbation: {'ON' if use_perturb else 'OFF'}, order={perturb_order}, thresh=1e-6, hp_dps=160.")
-
         # --- Engine mode (FULL_FRAME vs TILED) ---
         if self.tile_render_check.isChecked():
             # Parse tile size safely
             try:
-                tw, th = map(int,
-                             self.tile_size_input.text().lower().replace(' ',
-                                                                         '').split(
-                                 'x'))
+                tw, th = map(int, self.tile_size_input.text().lower().replace(' ', '').split('x'))
                 if tw <= 0 or th <= 0:
                     raise ValueError("Tile size must be positive.")
             except Exception as e:
-                self.log(
-                    f"Error in tile size input: {e}. Falling back to 256x256.")
+                self.log(f"Error in tile size input: {e}. Falling back to 256x256.")
                 tw, th = 256, 256
-            self.renderer.set_engine_mode(EngineMode.TILED, tile_w=tw,
-                                          tile_h=th)
-            self.log(f"Engine: TILED ({tw}x{th}).")
+
+            if self.adaptive_enabled:
+                self.apply_adaptive_settings()
+                opts = dict(self.adaptive_opts)
+                opts.update({"tile_w": tw,  "tile_h": th})
+                self.renderer.set_engine_mode(EngineMode.TILED, tile_w=tw, tile_h=th, adaptive_opts=opts)
+                self.log(f"Engine: ADAPTIVE TILED ({tw}x{th}) with {opts}.)")
+            else:
+                self.renderer.set_engine_mode(EngineMode.TILED, tile_w=tw, tile_h=th)
+                self.log(f"Engine: TILED ({tw}x{th}).")
         else:
             self.renderer.set_engine_mode(EngineMode.FULL_FRAME)
             self.log("Engine: FULL_FRAME.")
@@ -423,6 +470,42 @@ class FractalViewer(QMainWindow):
 
         # Trigger a new render with current viewport
         self.render_fractal()
+
+    def apply_adaptive_settings(self):
+        # parse safely; keep defaults if invalid
+        def _get_int(line, default):
+            try:
+                v = int(line.text().strip());
+                return v if v > 0 else default
+            except Exception:
+                return default
+
+        def _get_float(line, default):
+            try:
+                return float(line.text().strip())
+            except Exception:
+                return default
+
+        self.adaptive_opts["min_tile"] = _get_int(self.min_tile_input,
+                                                  self.adaptive_opts[
+                                                      "min_tile"])
+        self.adaptive_opts["max_tile"] = _get_int(self.max_tile_input,
+                                                  self.adaptive_opts[
+                                                      "max_tile"])
+        self.adaptive_opts["target_ms"] = _get_float(self.target_ms_input,
+                                                     self.adaptive_opts[
+                                                         "target_ms"])
+        self.adaptive_opts["max_depth"] = _get_int(self.max_depth_input,
+                                                   self.adaptive_opts[
+                                                       "max_depth"])
+        self.adaptive_opts["sample_stride"] = _get_int(
+            self.sample_stride_input, self.adaptive_opts["sample_stride"])
+        self.adaptive_opts["parallel"] = bool(self.parallel_chk.isChecked())
+        mw = _get_int(self.max_workers_input,
+                      self.adaptive_opts["max_workers"])
+        self.adaptive_opts["max_workers"] = mw if mw >= 0 else 0
+
+        self.log(f"Adaptive settings applied: {self.adaptive_opts}")
 
     # ----------------------- View tab actions -----------------------
     def apply_view_settings(self):
@@ -611,6 +694,9 @@ class FractalViewer(QMainWindow):
             f"zoom={zoom:.6g}, precision={precision_mode.name}."
         )
 
+        self.tiles_start_time = None
+        self.tiles_processed = 0
+
         self._clear_tile_queue()
         self.renderer.render_frame(min_x, max_x, min_y, max_y)
 
@@ -655,6 +741,7 @@ class FractalViewer(QMainWindow):
             # Clear transient animation base
             self.view_image = self.label.pixmap().toImage().copy()
             self.anim_base = None
+
             if self.final_render_pending:
                 self.final_render_pending = False
                 self._fade_in_image(self.cached_image)
@@ -717,6 +804,8 @@ class FractalViewer(QMainWindow):
         self.target_zoom = self.zoom * zoom_factor
         self.target_x = self.center_x + (mouse_pos.x() - self.label.width() / 2) / self.zoom
         self.target_y = self.center_y + (mouse_pos.y() - self.label.height() / 2) / self.zoom
+
+        self.tile_render_check.setChecked(True)
 
         self.update_view()
 
@@ -820,12 +909,25 @@ class FractalViewer(QMainWindow):
             self.tile_queue.append((gen, x, y, tile_qimg))
             self.tile_index[key] = len(self.tile_queue) - 1
 
+        if self.tiles_start_time is None:
+            self.tiles_start_time = time.time()
+        self.tiles_processed += 1
+
+        # Overlay
+        if self.show_tile_overlay:
+            self.tile_overlay_rects.append((x, y, tile_qimg.width(), tile_qimg.height()))
+
         if not self.animation_active and not self.tile_flush_timer.isActive():
             self.tile_flush_timer.start()
 
     def _flush_tile_queue(self):
         if self.animation_active:
             return
+
+        if self.tiles_start_time:
+            dt = max(1e-3, time.time() - self.tiles_start_time)
+            tps = self.tiles_processed / dt
+            self.stats_label.setText(f"Tiles: {self.tiles_processed} | Tiles/sec: {tps:.1f}")
 
         if self.cached_image is None:
             if self.view_image is not None:
@@ -842,6 +944,15 @@ class FractalViewer(QMainWindow):
             self.tile_index.pop(key, None)
             painter.drawImage(x, y, tile_qimg)
         painter.end()
+
+        if self.show_tile_overlay and self.tile_overlay_rects:
+            painter = QPainter(self.cached_image)
+            painter.setPen(Qt.GlobalColor.red)
+            overlay_budget = min(64, len(self.tile_overlay_rects))
+            for _ in range(overlay_budget):
+                x, y, w, h = self.tile_overlay_rects.popleft()
+                painter.drawRect(x, y, w, h)
+            painter.end()
 
         self.label.setPixmap(QPixmap.fromImage(self.cached_image))
 

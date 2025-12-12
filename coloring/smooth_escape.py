@@ -1,6 +1,6 @@
 import numpy as np
 
-from enums import ColoringMode
+from utils.enums import ColoringMode
 from coloring.base import ColoringStrategy
 
 class SmoothEscapeColoring(ColoringStrategy):

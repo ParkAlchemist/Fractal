@@ -30,11 +30,18 @@ class TileScorer:
 
     @staticmethod
     def _vis(x0: int, y0: int, w: int, h: int, W: int, H: int) -> float:
+        """
+        Checks wether given point is inside viewport i.e. is visible.
+        return 1.0 if visible, 0.0 if not.
+        """
         return 1.0 if (x0 < W and y0 < H and w > 0 and h > 0) else 0.0
 
     @staticmethod
     def _center_proximity(x0: int, y0: int, w: int, h: int, W: int,
                           H: int) -> float:
+        """
+        Calculates distance from center of viewport and normalizes value
+        """
         cx, cy = W * 0.5, H * 0.5
         tx, ty = x0 + w * 0.5, y0 + h * 0.5
         dist = math.hypot(tx - cx, ty - cy)
@@ -46,11 +53,18 @@ class TileScorer:
 
     @staticmethod
     def _area_on_screen(w: int, h: int, W: int, H: int) -> float:
+        """
+        Calculates relative area of given tile compared to viewport.
+        :return: tile_area / view_port_area
+        """
         return (w * h) / max(1.0, (W * H))
 
     @staticmethod
     def _motion_ahead(x0: int, y0: int, w: int, h: int, W: int, H: int,
                       vx: float, vy: float) -> float:
+        """
+        Calculates motion of given tile compared to previous viewport.
+        """
         cx, cy = W * 0.5, H * 0.5
         tx, ty = x0 + w * 0.5 - cx, y0 + h * 0.5 - cy
         tv = math.hypot(tx, ty)
@@ -61,20 +75,40 @@ class TileScorer:
         return max(0.0, (tx / tv) * (vx / vv) + (ty / tv) * (vy / vv))
 
     def _age(self, enqueue_time: float, now: float) -> float:
+        """
+        Calculates a normalized age for how long tile has been in queue
+        :param enqueue_time: when tile was added to queue
+        :param now: now
+        """
         # simple aging: ~1.0 after ~2 seconds in the queue
         if now <= enqueue_time:
             return 0.0
         return max(0.0, min(1.0, (now - enqueue_time) / self.age_target))
 
     def _var_norm(self, iteration_variance: float) -> float:
+        """
+        Normalizes iteration variance
+        :param iteration_variance:
+        :return: normalized iteration variance
+        """
         v = max(0.0, iteration_variance)
         return max(0.0, min(1.0, self.variance_gain * v))
 
     @staticmethod
     def _bnd_norm(boundary_likelihood: float) -> float:
+        """
+        Normalizes boundary likelihood
+        :param boundary_likelihood:
+        :return: normalized boundary likelihood
+        """
         return max(0.0, min(1.0, boundary_likelihood))
 
     def _seam_norm(self, neighbors_rendered: int) -> float:
+        """
+        Normalizes neighbors rendered
+        :param neighbors_rendered:
+        :return: normalized seam val
+        """
         cap = max(1, self.seam_cap)
         return max(0.0, min(1.0, neighbors_rendered / cap))
 
@@ -85,6 +119,10 @@ class TileScorer:
               neighbors_rendered: int,
               motion_vec: Tuple[float, float],
               moving: bool) -> float:
+        """
+        Calculates priority score for given tile based on multiple metrics
+        :return: priority score
+        """
 
         vx, vy = motion_vec
         Wt = self._wm if moving else self._wi

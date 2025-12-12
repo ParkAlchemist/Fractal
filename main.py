@@ -1,12 +1,11 @@
 import sys
+from PySide6.QtCore import QTimer
+from PySide6.QtWidgets import QApplication
 
-from PyQt5.QtCore import QTimer
-from PyQt5.QtWidgets import QApplication
-
-from view import FractalViewer
+from ui.view import FractalViewer
 
 app = QApplication(sys.argv)
 viewer = FractalViewer()
 viewer.show()
 QTimer.singleShot(0, viewer.render_fractal)
-sys.exit(app.exec_())
+sys.exit(app.exec())

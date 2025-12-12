@@ -1,11 +1,11 @@
 import os
 import numpy as np
-from PyQt5.QtGui import QImage
+from PySide6.QtGui import QImage
 from mpmath import mp
 from numba import cuda
 import pyopencl as cl
 
-from enums import Kernel
+from utils.enums import Kernel
 
 def fractal_to_image_coords(fx, fy, center_x, center_y, zoom, image_width, image_height):
     px = int((fx - center_x) * zoom + image_width / 2)
@@ -76,7 +76,7 @@ def qimage_to_ndarray(img: QImage, require_copy: bool = True) -> np.ndarray:
                QImage.Format_ARGB32_Premultiplied):
         # Memory layout is 4 bytes per pixel as BGRA on little-endian
         arr = np.frombuffer(ptr, dtype=np.uint8).reshape((h, bpl // 4, 4))
-        arr = arr[:, :w, :]  # drop padding at end of row, if any
+        arr = arr[:, :w, :]  # drop padding at the end of row, if any
         # Convert BGRA -> RGBA for conventional use
         arr = arr[..., [2, 1, 0, 3]]
         if fmt == QImage.Format_RGB32:

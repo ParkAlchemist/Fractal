@@ -3,31 +3,32 @@ from typing import Dict, Any, Optional
 
 from fractals.fractal_base import Fractal, Viewport, RenderSettings
 from backends.backend_base import Backend
-from kernel_sources.cpu.mandelbrot import (
-    mandelbrot_kernel_cpu_f32, mandelbrot_kernel_cpu_f64
-)
+
 
 class CpuBackend(Backend):
     name = "CPU"
 
+    def __init__(self):
+        self.kernel_func = None
+        self.precision = None
+
     def compile(self, fractal: Fractal, settings: RenderSettings) -> None:
-        pass  # Numba JIT on first call
+
+        params = fractal.get_kernel_source(settings, self.name)
+        self.kernel_func = params["kernel_source"]
+        self.precision = params["precision"]
 
     def render(self, fractal: Fractal, vp: Viewport, settings: RenderSettings,
                reference: Optional[Dict[str, Any]] = None) -> np.ndarray:
-        real = np.linspace(vp.min_x, vp.max_x, vp.width,
-                           dtype=settings.precision)
-        imag = np.linspace(vp.min_y, vp.max_y, vp.height,
-                           dtype=settings.precision)
+
+        args = fractal.get_kernel_args(vp, settings)
+
+        real = np.linspace(args["min_x"], args["max_x"], args["width"],
+                           dtype=self.precision)
+        imag = np.linspace(args["min_y"], args["max_y"], args["height"],
+                           dtype=self.precision)
         real_grid, imag_grid = np.meshgrid(real, imag)
 
-        if settings.precision == np.float32:
-            return mandelbrot_kernel_cpu_f32(real_grid, imag_grid, vp.width,
-                                             vp.height,
-                                             settings.max_iter,
-                                             settings.samples)
-        else:
-            return mandelbrot_kernel_cpu_f64(real_grid, imag_grid, vp.width,
-                                             vp.height,
-                                             settings.max_iter,
-                                             settings.samples)
+        return self.kernel_func(real_grid, imag_grid,
+                                args["width"], args["height"],
+                                args["max_iter"], args["samples"])

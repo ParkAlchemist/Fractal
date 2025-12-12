@@ -6,6 +6,7 @@ from typing import Dict, Optional, Tuple, List
 from rendering.tilescorer import TileScorer
 from fractals.fractal_base import Viewport
 
+
 @dataclass
 class TileInfo:
     x0: int
@@ -19,6 +20,7 @@ class TileInfo:
     iteration_variance: float = 0.0
     boundary_likelihood: float = 0.0
     neighbors_rendered: int = 0
+
 
 class TileScheduler:
     """
@@ -38,10 +40,19 @@ class TileScheduler:
         self._now = time.perf_counter()
 
     def clear(self):
+        """
+        Clears all priority queues.
+        :return: None
+        """
         for q in self.queues.values():
             q.clear()
 
-    def update_view(self, W: int, H: int, current_viewport: Viewport, last_viewport: Viewport) -> None:
+    def update_view(self, W: int, H: int, current_viewport: Viewport,
+                    last_viewport: Viewport) -> None:
+        """
+        Updates parameters based on new viewport.
+        :return: None
+        """
         self._W = W
         self._H = H
         if last_viewport is not None:
@@ -57,15 +68,24 @@ class TileScheduler:
 
     @staticmethod
     def _select_phase(t: TileInfo, visible: bool) -> str:
+        """
+        Selects correct priority queue for given tile
+        :return: name of priority queue
+        """
         if t.stale:
             return 'bg'
-        if visible and (t.iteration_variance > 0.5 or t.boundary_likelihood > 0.5):
+        if visible and (
+                t.iteration_variance > 0.5 or t.boundary_likelihood > 0.5):
             return 'refine'
         if visible:
             return 'seam'
         return 'bg'
 
     def enqueue(self, t: TileInfo, visible: bool) -> None:
+        """
+        Adds given tile into priority queue.
+        :return:
+        """
         phase = self._select_phase(t, visible)
         s = self.scorer.score(
             t.x0, t.y0, t.w, t.h, self._W, self._H,
@@ -76,6 +96,10 @@ class TileScheduler:
         heapq.heappush(self.queues[phase], (-s, id(t), t))
 
     def pop_next(self) -> Optional[Tuple[str, TileInfo]]:
+        """
+        Yields next tile from priority queue.
+        :return: next tile or None if queue is empty
+        """
         for phase in ('seam', 'refine', 'prefetch', 'bg'):
             if self.queues[phase]:
                 _, _, t = heapq.heappop(self.queues[phase])

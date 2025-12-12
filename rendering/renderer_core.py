@@ -6,6 +6,9 @@ from backends.backend_base import Backend
 from rendering.render_engines import BaseRenderEngine, FullFrameEngine
 
 class Renderer:
+    """
+    Main construct for combining the rendering pipeline: (engine + fractal + backend)
+    """
     def __init__(self, fractal: Fractal, backend: Backend, settings: RenderSettings,
                  engine: Optional[BaseRenderEngine] = None):
         self.fractal = fractal

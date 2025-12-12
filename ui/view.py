@@ -1,29 +1,29 @@
 import sys
 import time
-from datetime import datetime
-import numpy as np
 from collections import deque
+from datetime import datetime
 
-from PyQt5.QtWidgets import (
+import numpy as np
+from PySide6.QtCore import Qt, QTimer, QPropertyAnimation, QEasingCurve
+from PySide6.QtGui import QPixmap, QPainter, QImage, QTextCursor
+from PySide6.QtWidgets import (
     QApplication, QMainWindow, QLabel, QVBoxLayout, QWidget,
     QPushButton, QComboBox, QFileDialog, QHBoxLayout, QDockWidget, QTabWidget,
     QFormLayout, QLineEdit, QSizePolicy, QRadioButton, QButtonGroup, QCheckBox,
     QPlainTextEdit
 )
-from PyQt5.QtGui import QPixmap, QPainter, QImage
-from PyQt5.QtCore import Qt, QTimer, QPropertyAnimation, QEasingCurve
 
-from palettes import palettes
-from render import FullImageRenderer
-from enums import Kernel, ColoringMode, EngineMode, Tools, Precisions
-from utils import available_backends
+from coloring.palettes import palettes
+from rendering.render import FullImageRenderer
+from utils.enums import Kernel, ColoringMode, EngineMode, Tools, Precisions
+from utils.utils import available_backends
 
 
 class FractalViewer(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Fractal Viewer")
-        self.window_height = 1080
+        self.window_height = 900
         self.aspect_ratio = 16 / 9
         self.window_width = int(self.window_height * self.aspect_ratio)
         self.setGeometry(100, 100, self.window_width, self.window_height)
@@ -83,7 +83,7 @@ class FractalViewer(QMainWindow):
             "target_ms": 12.0,
             "max_depth": 4,
             "sample_stride": 8,
-            "parallel": True,
+            "parallel": False,
             "max_workers": 0,  # 0 -> auto
         }
         self.show_tile_overlay = True
@@ -401,7 +401,7 @@ class FractalViewer(QMainWindow):
         """
         # Ensure renderer exists
         if self.renderer is None:
-            # Lazily create the renderer with current viewport
+            # Lazily create the renderer with the current viewport
             self.render_fractal()
             if self.renderer is None:
                 self.log(
@@ -468,7 +468,7 @@ class FractalViewer(QMainWindow):
             self.renderer.set_kernel(new_kernel)
             self.log(f"Kernel set to {kernel_str}.")
 
-        # Trigger a new render with current viewport
+        # Trigger a new render with the current viewport
         self.render_fractal()
 
     def apply_adaptive_settings(self):
@@ -533,7 +533,7 @@ class FractalViewer(QMainWindow):
         line = f"[{timestamp}] {msg}"
         self.log_view.appendPlainText(line)
         if self.log_autoscroll_chk.isChecked():
-            self.log_view.moveCursor(self.log_view.textCursor().End)
+            self.log_view.moveCursor(QTextCursor.End)
 
     def set_tools(self, tool):
         if tool == Tools.Drag:
@@ -574,7 +574,7 @@ class FractalViewer(QMainWindow):
         """
         self.log("Image updated from renderer.")
 
-        # Guard: label not yet sized or image null
+        # Guard: label is not yet sized or image null
         if self.label.width() <= 0 or self.label.height() <= 0 or image is None or image.isNull():
             self.view_image = image
             self.label.setPixmap(QPixmap.fromImage(image))
@@ -592,7 +592,7 @@ class FractalViewer(QMainWindow):
             self.final_render_pending = True
 
     def _fade_in_image(self, image: QImage):
-        # If label is not sized yet, set directly
+        # If the label is not sized yet, set directly
         if self.label.width() <= 0 or self.label.height() <= 0 or image is None or image.isNull():
             self.view_image = image
             self.label.setPixmap(QPixmap.fromImage(image))
@@ -822,7 +822,7 @@ class FractalViewer(QMainWindow):
                     self.start_center_x = self.center_x
                     self.start_center_y = self.center_y
                 if self.set_center_tool.isChecked():
-                    # Ensure zoom stays unchanged when only center changes
+                    # Ensure the zoom stays unchanged when only the center changes
                     self.target_zoom = self.zoom
                     self.update_view()
                 if self.click_zoom_tool.isChecked():

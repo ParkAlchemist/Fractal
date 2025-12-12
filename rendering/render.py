@@ -2,12 +2,12 @@ import threading
 
 import numpy as np
 import time
-from PyQt5.QtCore import pyqtSignal, QObject, QThread
-from PyQt5.QtGui import QImage
+from PySide6.QtCore import Signal, QObject, QThread
+from PySide6.QtGui import QImage
 
-from enums import Kernel, ColoringMode, EngineMode, Precisions
-from palettes import palettes
-from utils import available_backends, ndarray_to_qimage
+from utils.enums import Kernel, ColoringMode, EngineMode, Precisions
+from coloring.palettes import palettes
+from utils.utils import available_backends, ndarray_to_qimage
 from backends.opencl_backend import OpenClBackend
 from backends.cpu_backend import CpuBackend
 from backends.cuda_backend import CudaBackend
@@ -20,7 +20,7 @@ from rendering.render_engines import FullFrameEngine, TileEngine, AdaptiveTileEn
 # --- Workers ---------------------------------------------------------------
 
 class FullImageRenderWorker(QThread):
-    iter_calc_done = pyqtSignal(np.ndarray)
+    iter_calc_done = Signal(np.ndarray)
 
     def __init__(self, renderer: Renderer, viewport: Viewport):
         super().__init__()
@@ -41,8 +41,8 @@ class FullImageRenderWorker(QThread):
 
 
 class ProgressiveTileRenderWorker(QThread):
-    tile_done = pyqtSignal(int, int, int, int, np.ndarray, int)
-    finished_frame = pyqtSignal(np.ndarray, int)
+    tile_done = Signal(int, int, int, int, np.ndarray, int)
+    finished_frame = Signal(np.ndarray, int)
 
     def __init__(self, renderer: Renderer, viewport: Viewport, seq: int):
         super().__init__()
@@ -82,9 +82,9 @@ class ProgressiveTileRenderWorker(QThread):
 # --- Renderer facade -------------------------------------------------------
 
 class FullImageRenderer(QObject):
-    image_updated = pyqtSignal(QImage)                 # final full frame / full-frame mode
-    tile_ready = pyqtSignal(int, int, int, QImage)   # (gen_id, x, y, tile QImage)
-    log_text = pyqtSignal(str)
+    image_updated = Signal(QImage)                 # final full frame / full-frame mode
+    tile_ready = Signal(int, int, int, QImage)   # (gen_id, x, y, tile QImage)
+    log_text = Signal(str)
 
     def __init__(self, width, height, palette, kernel=Kernel.AUTO,
                  max_iter=200, samples=2, coloring_mode=ColoringMode.EXTERIOR,

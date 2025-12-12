@@ -1,7 +1,7 @@
 from abc import ABC, abstractmethod
 import numpy as np
 
-from enums import ColoringMode
+from utils.enums import ColoringMode
 
 class ColoringStrategy(ABC):
     @abstractmethod

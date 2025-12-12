@@ -12,6 +12,9 @@ from rendering.tilescorer import TileScorer
 
 
 class BaseRenderEngine(ABC):
+    """
+    Base class for rendering engines.
+    """
     def __init__(self, on_tile: Optional[Callable[[int, int, np.ndarray], None]] = None):
         self.on_tile = on_tile
 
@@ -22,12 +25,19 @@ class BaseRenderEngine(ABC):
         ...
 
 class FullFrameEngine(BaseRenderEngine):
+    """
+    Rendering engine for full-frame rendering.
+    """
     def render(self, fractal: Fractal, backend, settings: RenderSettings,
                vp: Viewport,
                cancel_cb: Optional[Callable[[], bool]] = None) -> np.ndarray:
         return backend.render(fractal, vp, settings)
 
 class TileEngine(BaseRenderEngine):
+    """
+    Simple tile-based rendering engine. Divides viewport into given sized tiles
+    and renders them sequentially.
+    """
     def __init__(self, tile_w: int = 256, tile_h: int = 256,
                  on_tile: Optional[Callable[[int, int, np.ndarray], None]] = None):
         super().__init__(on_tile)
@@ -161,7 +171,7 @@ class AdaptiveTileEngine(BaseRenderEngine):
         executor: Optional[ThreadPoolExecutor] = ThreadPoolExecutor(max_workers=workers) if workers > 1 else None
         inflight = set() # track futures
 
-        # Local settings: preview vs refine
+        # Local settings
         def make_settings(base: RenderSettings, max_iter: int) -> RenderSettings:
             s = RenderSettings(max_iter=max_iter, samples=base.samples, precision=base.precision)
             return s
@@ -175,10 +185,13 @@ class AdaptiveTileEngine(BaseRenderEngine):
 
             st = make_settings(settings, settings.max_iter)
 
+            # Higher sample amounts for more computation heavy tiles
+            # for smoother image quality
             if phase == 'refine':
                 if ti.iteration_variance > 0.5 or ti.boundary_likelihood > 0.5:
                     st.samples = depth * 2 if depth != 0 else 1
 
+            # Render
             t0 = time.perf_counter()
             tile_iters = backend.render(fractal, sub_vp, st)
             t_ms = (time.perf_counter() - t0) * 1000.0
@@ -186,11 +199,12 @@ class AdaptiveTileEngine(BaseRenderEngine):
             with canvas_lock:
                 canvas[ti.y0: ti.y0 + ti.h, ti.x0: ti.x0 + ti.w] = tile_iters
             if callable(self.on_tile):
-                self.on_tile(ti.x0, ti.y0, tile_iters)
+                self.on_tile(ti.x0, ti.y0, tile_iters) # emit
 
             ti.iteration_variance = self._compute_iteration_variance(tile_iters)
             ti.boundary_likelihood = self._compute_boundary_likelihood(tile_iters)
 
+            # decide wether tile should be split
             split = (ti.depth < self.max_depth) and self._should_split(tile_iters, t_ms, ti.w, ti.h)
             return ti, tile_iters, split
 
@@ -198,16 +212,19 @@ class AdaptiveTileEngine(BaseRenderEngine):
             while True:
 
                 if cancel_cb is not None and cancel_cb():
+                    # Current operation has become obsolete -> return
                     break
 
                 popped = self.scheduler.pop_next()
                 if popped is None and not inflight:
+                    # Queue empty and all tasks done -> return
                     break
 
                 while popped is not None and (executor is None or len(inflight) < workers):
 
                     phase, ti = popped
                     if executor is None:
+                        # Sequential path
                         ti, _, split = compute_tile(ti, phase)
                         if split:
                             for child in self._split((ti.x0, ti.y0, ti.w, ti.h, ti.depth), W, H):
@@ -217,6 +234,7 @@ class AdaptiveTileEngine(BaseRenderEngine):
                                                enqueue_time=time.perf_counter())
                                 self.scheduler.enqueue(cti, visible=self._visible(cti, W, H))
                     else:
+                        # Parallel path
                         fut = executor.submit(compute_tile, ti, phase)
                         inflight.add(fut)
                     popped = self.scheduler.pop_next()
@@ -247,7 +265,9 @@ class AdaptiveTileEngine(BaseRenderEngine):
     # ------- Helpers -------------------------------------
     @staticmethod
     def _wait_some(inflight, timeout: float):
-        """Wait for at least one future to complete"""
+        """
+        Wait for at least one future to complete
+        """
         done = set()
         if not inflight:
             return done, inflight
@@ -260,7 +280,9 @@ class AdaptiveTileEngine(BaseRenderEngine):
         return done, inflight
 
     def _seed_root_tiles(self, W, H, max_tile):
-        # Cover the viewport with large blocks aligned to multiples of 32
+        """
+        Cover the viewport with large blocks aligned to multiples of 32
+        """
         step = max(self._align_32(max_tile), 32)
         tiles = []
         for y in range(0, H, step):
@@ -276,6 +298,10 @@ class AdaptiveTileEngine(BaseRenderEngine):
         return max((n // 32) * 32, 32)
 
     def _should_split(self, tile_iters, t_ms, w, h):
+        """
+        Check wether given tile should be split or not
+        :return: True or False
+        """
         if w <= self.min_tile and h <= self.min_tile:
             return False
 
@@ -285,6 +311,10 @@ class AdaptiveTileEngine(BaseRenderEngine):
         return time_heavy or var > 0.5
 
     def _split(self, tile, W, H):
+        """
+        Splits given tile into 4 tiles
+        :return: split tiles
+        """
         x0, y0, w, h, depth = tile
         w2 = max(self.min_tile, self._align_32(w // 2))
         h2 = max(self.min_tile, self._align_32(h // 2))
@@ -306,6 +336,10 @@ class AdaptiveTileEngine(BaseRenderEngine):
 
     @staticmethod
     def _make_sub_viewport(vp: Viewport, x0: int, y0: int, w: int, h: int) -> Viewport:
+        """
+        Creates a subviewport on given coordinates from given viewport
+        :return: subviewport
+        """
         W, H = vp.width, vp.height
         sx, ex = x0 / W, (x0 + w) / W
         sy, ey = y0 / H, (y0 + h) / H
@@ -317,15 +351,27 @@ class AdaptiveTileEngine(BaseRenderEngine):
 
     @staticmethod
     def _visible(ti: TileInfo, W: int, H: int) -> bool:
+        """
+        Checks wether given tile is visible in the viewport
+        :return: True or False
+        """
         return ti.x0 < W and ti.y0 < H and ti.w > 0 and ti.h > 0
 
     def _compute_iteration_variance(self, tile_iters: np.ndarray) -> float:
+        """
+        Computes the iteration variance for given tile
+        :return: iteration variance
+        """
         sample = tile_iters[::self.sample_stride, ::self.sample_stride]
         v = float(np.var(sample))
         return max(0.0, min(1.0, v))
 
     @staticmethod
     def _compute_boundary_likelihood(tile_iters: np.ndarray) -> float:
+        """
+        Computes the likelihood of the given tile being near a set boundary
+        :return: likelihood [0.0, 1.0]
+        """
         total = tile_iters.size
         if total == 0:
             return 0.0

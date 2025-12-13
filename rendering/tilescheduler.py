@@ -15,6 +15,7 @@ class TileInfo:
     h: int
     depth: int
     enqueue_time: float
+    resolution: str = None
     # dynamic
     stale: bool = False
     iteration_variance: float = 0.0
@@ -98,7 +99,7 @@ class TileScheduler:
     def pop_next(self) -> Optional[Tuple[str, TileInfo]]:
         """
         Yields next tile from priority queue.
-        :return: next tile or None if queue is empty
+        :return: Next tile or None if queue is empty
         """
         for phase in ('seam', 'refine', 'prefetch', 'bg'):
             if self.queues[phase]:

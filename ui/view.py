@@ -1,11 +1,10 @@
 import sys
 import time
-from collections import deque
 from datetime import datetime
 
 import numpy as np
 from PySide6.QtCore import Qt, QTimer, QPropertyAnimation, QEasingCurve
-from PySide6.QtGui import QPixmap, QPainter, QImage, QTextCursor
+from PySide6.QtGui import QPixmap, QPainter, QImage, QTextCursor, QWheelEvent
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QLabel, QVBoxLayout, QWidget,
     QPushButton, QComboBox, QFileDialog, QHBoxLayout, QDockWidget, QTabWidget,
@@ -17,9 +16,15 @@ from coloring.palettes import palettes
 from rendering.render import FullImageRenderer
 from utils.enums import Kernel, ColoringMode, EngineMode, Tools, Precisions
 from utils.utils import available_backends
+from ui.view_components import (AspectRatioContainer, ViewState,
+                                RenderSizePolicy, TileCompositor)
 
 
+# =============================================================================
+# Main Window
+# =============================================================================
 class FractalViewer(QMainWindow):
+    # ---------- Construction & UI wiring ----------
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Fractal Viewer")
@@ -28,28 +33,34 @@ class FractalViewer(QMainWindow):
         self.window_width = int(self.window_height * self.aspect_ratio)
         self.setGeometry(100, 100, self.window_width, self.window_height)
 
-        # Main fractal display
-        self.label = QLabel(self)
-        self.label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.label.setScaledContents(True)
-        self.label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        # World/view state
+        self.state = ViewState(center_x=-0.5, center_y=0.0, zoom=250.0,
+                               aspect_ratio=self.aspect_ratio, zoom_factor=2.0)
 
-        # View parameters
-        self.center_x = -0.5
-        self.center_y = 0.0
-        self.zoom = 250.0
-        self.zoom_factor = 2
+        # Render policy (target size / lod)
+        self.rsize = RenderSizePolicy(pitch_multiple=32)
+        self.rsize.target_quality = "720p"
+        # Progressive disabled by default; set e.g., [0.25, 0.5, 1.0] to enable
+        self.rsize.lod_steps = [1.0]
+        self.precompute_during = False
 
-        # Animation state
-        self.animation_timer = None
+        # Renderer
+        self.renderer: FullImageRenderer | None = None
+        self.view_image: QImage | None = None
+        self.cached_image: QImage | None = None
+
+        # Animation / interaction state
+        self.animation_timer: QTimer | None = None
         self.animation_steps = 40
         self.current_step = 0
         self.phase = 1
-        self.start_x = self.start_y = self.start_zoom = 0
-        self.target_x = self.target_y = self.target_zoom = 0
+        self.start_x = self.start_y = self.start_zoom = 0.0
+        self.target_x = self.target_y = 0.0
+        self.target_zoom = self.state.zoom
         self.final_render_pending = False
         self.anim_fps = 60
         self.anim_interval = int((1 / self.anim_fps) * 1000)
+        self.animation_active = False
 
         # Drag state
         self.dragging = False
@@ -57,47 +68,32 @@ class FractalViewer(QMainWindow):
         self.start_center_x = None
         self.start_center_y = None
 
-        # Palette
+        # UI defaults
         self.default_palette_name = "Classic"
 
-        # Image
-        self.renderer = None
-        self.view_image = None
-        self.cached_image = None
-        self.anim_base = None
+        # Display label (scaled & policy) inside an aspect ratio container
+        self.display = QLabel(self)
+        self.display.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.display.setScaledContents(True)
+        self.display.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Ignored)
+        self.display_container = AspectRatioContainer(self.aspect_ratio, self.display, parent=self)
+        self.display_container.set_padding(8, 0, 8, 0)
 
-        # --- Progressive tile compositing state ---
-        self.animation_active = False
-        self.tile_queue = deque()         # items: (gen, x, y, QImage)
-        self.tile_index = {}              # coalescing map: (gen,x,y,w,h)->index
-        self.tile_flush_timer = QTimer(self)
-        self.tile_flush_timer.setInterval(16)  # ~60 FPS
-        self.tile_flush_timer.timeout.connect(self._flush_tile_queue)
-        self.tile_overlay_rects = deque(maxlen=5000)
+        # Tile compositor (handles queue & scaled painting)
+        self.stats_label = QLabel("Tiles: 0 \nTiles/sec: 0.0")
+        self.stats_label.setStyleSheet("color: #AAB; padding: 2px;")
+        self.compositor = TileCompositor(self.display, self.stats_label, parent=self)
 
-        # --- Adaptive engine UI state & stats ---
-        self.adaptive_enabled = True
-        self.adaptive_opts = {
-            "min_tile": 64,
-            "max_tile": 256,
-            "target_ms": 12.0,
-            "max_depth": 4,
-            "sample_stride": 8,
-            "parallel": False,
-            "max_workers": 0,  # 0 -> auto
-        }
-        self.show_tile_overlay = True
-        self.tiles_processed = 0
-        self.tiles_start_time = None
+        # UI sets
+        self._build_ui()
 
-        self.init_ui()
-
-    def init_ui(self):
-        # Central layout
+    def _build_ui(self):
+        # ----- Central layout -----
         layout = QVBoxLayout()
-        layout.addWidget(self.label)
+        layout.setContentsMargins(16, 8, 12, 8)
+        layout.addWidget(self.display_container)
 
-        # ---------- Bottom controls ----------
+        # Bottom controls
         controls = QHBoxLayout()
         save_button = QPushButton("Save Image")
         save_button.clicked.connect(self.save_image)
@@ -106,23 +102,20 @@ class FractalViewer(QMainWindow):
         tools = QHBoxLayout()
         self.drag_tool = QCheckBox("Drag tool")
         self.drag_tool.setChecked(False)
-        tools.addWidget(self.drag_tool)
-        self.drag_tool.clicked.connect(lambda checked: checked and self.set_tools(Tools.Drag))
-
         self.click_zoom_tool = QCheckBox("Click-Zoom tool")
         self.click_zoom_tool.setChecked(False)
-        tools.addWidget(self.click_zoom_tool)
-        self.click_zoom_tool.clicked.connect(lambda checked: checked and self.set_tools(Tools.Click_zoom))
-
         self.wheel_zoom_tool = QCheckBox("Wheel-Zoom tool")
         self.wheel_zoom_tool.setChecked(False)
-        tools.addWidget(self.wheel_zoom_tool)
-        self.wheel_zoom_tool.clicked.connect(lambda checked: checked and self.set_tools(Tools.Wheel_zoom))
-
         self.set_center_tool = QCheckBox("Set-Center tool")
         self.set_center_tool.setChecked(False)
-        tools.addWidget(self.set_center_tool)
+
+        self.drag_tool.clicked.connect(lambda checked: checked and self.set_tools(Tools.Drag))
+        self.click_zoom_tool.clicked.connect(lambda checked: checked and self.set_tools(Tools.Click_zoom))
+        self.wheel_zoom_tool.clicked.connect(lambda checked: checked and self.set_tools(Tools.Wheel_zoom))
         self.set_center_tool.clicked.connect(lambda checked: checked and self.set_tools(Tools.Set_center))
+
+        for w in (self.drag_tool, self.click_zoom_tool, self.wheel_zoom_tool, self.set_center_tool):
+            tools.addWidget(w)
 
         layout.addLayout(tools)
         layout.addLayout(controls)
@@ -131,24 +124,27 @@ class FractalViewer(QMainWindow):
         container.setLayout(layout)
         self.setCentralWidget(container)
 
-        # ---------- Side Menu ----------
+        # ----- Side dock: Controls -----
         self.side_menu = QDockWidget("Controls", self)
         self.side_menu.setAllowedAreas(Qt.DockWidgetArea.RightDockWidgetArea)
-        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.side_menu)
         self.side_menu.setFeatures(QDockWidget.NoDockWidgetFeatures)
-
         tabs = QTabWidget()
         self.side_menu.setWidget(tabs)
+        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.side_menu)
 
-        # ---- Render tab ----
+        # Render tab
         render_tab = QWidget()
         render_layout = QFormLayout()
-
         self.kernel_input = QComboBox()
-        backends = available_backends()
-        self.kernel_input.addItems(sorted(backends))
-        self.kernel_input.setCurrentText(backends[0])
+        backs = available_backends()
+        self.kernel_input.addItems(sorted(backs))
+        self.kernel_input.setCurrentText(backs[0])
         render_layout.addRow("Kernel: ", self.kernel_input)
+
+        self.res_input = QComboBox()
+        self.res_input.addItems(["2160p", "1440p", "1080p", "720p", "480p", "360p"])
+        self.res_input.setCurrentText(self.rsize.target_quality)
+        render_layout.addRow("Resolution: ", self.res_input)
 
         self.iter_input = QComboBox()
         self.iter_input.addItems(["100", "200", "500", "1000", "2000", "5000"])
@@ -167,42 +163,44 @@ class FractalViewer(QMainWindow):
         self.tile_size_input = QLineEdit("512x512")
         render_layout.addRow("Tile size (WxH):", self.tile_size_input)
 
-        # Enable/disable adaptive engine (still respects the "Tile rendering" checkbox)
+        # Adaptive tiling options
+        self.adaptive_enabled = True
+        self.adaptive_opts = {
+            "min_tile": 32,
+            "max_tile": 256,
+            "target_ms": 12.0,
+            "max_depth": 4,
+            "sample_stride": 8,
+            "parallel": False,
+            "max_workers": 0,  # 0 -> auto
+        }
+
         self.adaptive_enable_chk = QCheckBox("Enable Adaptive Tiling")
         self.adaptive_enable_chk.setChecked(True)
-        self.adaptive_enable_chk.toggled.connect(
-            lambda b: setattr(self, "adaptive_enabled", bool(b)))
+        self.adaptive_enable_chk.toggled.connect(lambda b: setattr(self, "adaptive_enabled", bool(b)))
         render_layout.addRow(self.adaptive_enable_chk)
 
-        # Tile size bounds
         self.min_tile_input = QLineEdit(str(self.adaptive_opts["min_tile"]))
         self.max_tile_input = QLineEdit(str(self.adaptive_opts["max_tile"]))
         render_layout.addRow("Min tile (px):", self.min_tile_input)
         render_layout.addRow("Max tile (px):", self.max_tile_input)
 
-        # Budget / depth / sampling
         self.target_ms_input = QLineEdit(str(self.adaptive_opts["target_ms"]))
         self.max_depth_input = QLineEdit(str(self.adaptive_opts["max_depth"]))
-        self.sample_stride_input = QLineEdit(
-            str(self.adaptive_opts["sample_stride"]))
-        render_layout.addRow("Target time per tile (ms):",
-                               self.target_ms_input)
+        self.sample_stride_input = QLineEdit(str(self.adaptive_opts["sample_stride"]))
+        render_layout.addRow("Target time per tile (ms):", self.target_ms_input)
         render_layout.addRow("Max quadtree depth:", self.max_depth_input)
         render_layout.addRow("Sample stride:", self.sample_stride_input)
 
-        # Concurrency
         self.parallel_chk = QCheckBox("Parallel (CPU)")
         self.parallel_chk.setChecked(self.adaptive_opts["parallel"])
-        self.max_workers_input = QLineEdit(
-            str(self.adaptive_opts["max_workers"]))
+        self.max_workers_input = QLineEdit(str(self.adaptive_opts["max_workers"]))
         render_layout.addRow(self.parallel_chk)
         render_layout.addRow("Max workers (0=auto):", self.max_workers_input)
 
-        # Overlay
         self.overlay_chk = QCheckBox("Show tile overlay")
         self.overlay_chk.setChecked(True)
-        self.overlay_chk.toggled.connect(
-            lambda b: setattr(self, "show_tile_overlay", bool(b)))
+        self.overlay_chk.toggled.connect(lambda b: self.compositor.set_overlay_enabled(bool(b)))
         render_layout.addRow(self.overlay_chk)
 
         apply_render_btn = QPushButton("Apply")
@@ -211,42 +209,31 @@ class FractalViewer(QMainWindow):
 
         render_tab.setLayout(render_layout)
 
-        # ---- Palette tab ----
+        # Palette tab
         palette_tab = QWidget()
         palette_layout = QFormLayout()
-
         self.coloring_mode_group = QButtonGroup(self)
         self.radio_exterior = QRadioButton("Exterior")
         self.radio_interior = QRadioButton("Interior")
         self.radio_hybrid = QRadioButton("Hybrid")
-        self.radio_exterior.setChecked(True)  # Default
+        self.radio_exterior.setChecked(True)
         self.coloring_mode_group.addButton(self.radio_exterior)
         self.coloring_mode_group.addButton(self.radio_interior)
         self.coloring_mode_group.addButton(self.radio_hybrid)
-
         palette_layout.addRow("Coloring Mode: ", self.radio_exterior)
         palette_layout.addRow("", self.radio_interior)
         palette_layout.addRow("", self.radio_hybrid)
 
-        # Mode toggles
-        self.radio_exterior.toggled.connect(
-            lambda checked: checked and self.change_coloring_mode(
-                ColoringMode.EXTERIOR))
-        self.radio_interior.toggled.connect(
-            lambda checked: checked and self.change_coloring_mode(
-                ColoringMode.INTERIOR))
-        self.radio_hybrid.toggled.connect(
-            lambda checked: checked and self.change_coloring_mode(
-                ColoringMode.HYBRID))
+        self.radio_exterior.toggled.connect(lambda checked: checked and self.change_coloring_mode(ColoringMode.EXTERIOR))
+        self.radio_interior.toggled.connect(lambda checked: checked and self.change_coloring_mode(ColoringMode.INTERIOR))
+        self.radio_hybrid.toggled.connect(lambda checked: checked and self.change_coloring_mode(ColoringMode.HYBRID))
 
-        # Exterior Palette
         self.exter_palette_input = QComboBox()
         self.exter_palette_input.addItems(palettes.keys())
         self.exter_palette_input.setCurrentText(self.default_palette_name)
         self.exter_palette_input.currentTextChanged.connect(self.change_exter_palette)
         palette_layout.addRow("Exterior Palette: ", self.exter_palette_input)
 
-        # Interior Palette
         self.inter_palette_input = QComboBox()
         self.inter_palette_input.addItems(palettes.keys())
         self.inter_palette_input.setCurrentText(self.default_palette_name)
@@ -255,54 +242,50 @@ class FractalViewer(QMainWindow):
 
         palette_tab.setLayout(palette_layout)
 
-        # ---- View tab ----
+        # View tab
         view_tab = QWidget()
         view_layout = QFormLayout()
+        self.aspect_ratio_input = QComboBox()
+        self.aspect_ratio_input.addItems(["16:9", "4:3", "1:1"])
+        self.aspect_ratio_input.setCurrentText("16:9")
+        view_layout.addRow("Aspect Ratio: ", self.aspect_ratio_input)
 
-        self.center_x_input = QLineEdit(str(self.center_x))
-        self.center_y_input = QLineEdit(str(self.center_y))
+        self.center_x_input = QLineEdit(str(self.state.center_x))
+        self.center_y_input = QLineEdit(str(self.state.center_y))
+        self.zoom_input = QLineEdit(str(self.state.zoom))
+        self.zoom_factor_input = QLineEdit(str(self.state.zoom_factor))
         view_layout.addRow("Center X: ", self.center_x_input)
         view_layout.addRow("Center Y: ", self.center_y_input)
-
-        self.zoom_input = QLineEdit(str(self.zoom))
         view_layout.addRow("Zoom: ", self.zoom_input)
-
-        self.zoom_factor_input = QLineEdit(str(self.zoom_factor))
         view_layout.addRow("Zoom Factor: ", self.zoom_factor_input)
-
         apply_view_btn = QPushButton("Apply")
         apply_view_btn.clicked.connect(self.apply_view_settings)
         view_layout.addRow(apply_view_btn)
-
         view_tab.setLayout(view_layout)
 
         tabs.addTab(render_tab, "Render")
         tabs.addTab(palette_tab, "Palette")
         tabs.addTab(view_tab, "View")
 
-        # ---------- Log Dock ----------
+        # Log dock
         self.log_dock = QDockWidget("Log", self)
         self.log_dock.setAllowedAreas(Qt.DockWidgetArea.RightDockWidgetArea)
         self.log_dock.setFeatures(QDockWidget.NoDockWidgetFeatures)
-
         self.log_view = QPlainTextEdit(self)
         self.log_view.setReadOnly(True)
         self.log_view.setMaximumBlockCount(5000)
         self.log_view.setStyleSheet(
             "background: #0f0f10; color: #cfd2d6; font-family: Consolas, monospace; font-size: 11px;"
         )
-
         log_container = QWidget(self)
         log_v = QVBoxLayout(log_container)
         log_v.setContentsMargins(6, 6, 6, 6)
-
         log_controls = QHBoxLayout()
         log_controls.setSpacing(8)
         btn_clear = QPushButton("Clear")
         btn_copy = QPushButton("Copy")
         self.log_autoscroll_chk = QCheckBox("Auto-scroll")
         self.log_autoscroll_chk.setChecked(True)
-
         btn_clear.clicked.connect(lambda: self.log_view.clear())
 
         def copy_all():
@@ -311,109 +294,96 @@ class FractalViewer(QMainWindow):
             self.log_view.moveCursor(self.log_view.textCursor().End)
 
         btn_copy.clicked.connect(copy_all)
-
         log_controls.addWidget(btn_clear)
         log_controls.addWidget(btn_copy)
         log_controls.addStretch(1)
         log_controls.addWidget(self.log_autoscroll_chk)
-
         log_v.addLayout(log_controls)
         log_v.addWidget(self.log_view)
-
-        self.stats_label = QLabel("Tiles: 0 | Tiles/sec: 0.0")
-        self.stats_label.setStyleSheet("color: #AAB; padding: 2px;")
         log_v.addWidget(self.stats_label)
-
         self.log_dock.setWidget(log_container)
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.log_dock)
         self.splitDockWidget(self.side_menu, self.log_dock, Qt.Orientation.Vertical)
 
-    # ----------------------- Rendering -----------------------
-    def render_fractal(self):
-        width = self.label.width()
-        height = self.label.height()
-        if width == 0 or height == 0:
-            return
-
-        if self.renderer is None:
-            self.renderer = FullImageRenderer(
-                width, height,
-                palettes[self.default_palette_name],
-                kernel=Kernel.AUTO,
-                max_iter=200, samples=2,
-                coloring_mode=ColoringMode.EXTERIOR,
-                precision=np.float32
-            )
-            self.renderer.image_updated.connect(self.update_image)
-            self.renderer.tile_ready.connect(self._on_tile_ready)
-            self.renderer.log_text.connect(self.log)
-
-        scale = 1.0 / self.zoom
-        min_x = self.center_x - (width / 2) * scale
-        max_x = self.center_x + (width / 2) * scale
-        min_y = self.center_y - (height / 2) * scale
-        max_y = self.center_y + (height / 2) * scale
-
-        # Precision
-        if self.zoom > 1e14:
-            precision_mode = Precisions.Arbitrary
-        elif self.zoom > 1e6:
-            precision_mode = Precisions.Double
-        else:
-            precision_mode = Precisions.Single
-        self.renderer.set_precision(precision_mode)
-
-        self.log(
-            f"Render frame: size={width}x{height}, "
-            f"center=({self.center_x:.6g},{self.center_y:.6g}), "
-            f"zoom={self.zoom:.6g}, precision={precision_mode.name}."
-        )
-
-        self.tiles_start_time = None
-        self.tiles_processed = 0
-
-        self._clear_tile_queue()
-        self.renderer.render_frame(min_x, max_x, min_y, max_y)
-
-    # ----------------------- Palette & Mode -----------------------
+    # ---------- Palette/View/Render setting handlers ----------
     def change_coloring_mode(self, mode):
         if self.renderer:
             self.renderer.set_coloring_mode(mode)
             self.log(f"Set coloring mode to {mode.name}.")
-            self.render_fractal()
+            self.renderer.render_image()
 
     def change_exter_palette(self, name):
         if self.renderer:
             self.renderer.set_exter_palette(name)
             self.log(f"Set Exterior palette to {name}.")
-            self.render_fractal()
+            self.renderer.render_image()
 
     def change_inter_palette(self, name):
         if self.renderer:
             self.renderer.set_inter_palette(name)
             self.log(f"Set Interior palette to {name}.")
+            self.renderer.render_image()
+
+    def apply_view_settings(self):
+        try:
+            ar = str(self.aspect_ratio_input.currentText())
+            nom, denom = map(int, ar.split(':'))
+            new_ar = nom / denom
+            prev_ar = self.state.aspect_ratio
+            prev_w, prev_h = self.rsize.compute_target_size(prev_ar)
+            self.aspect_ratio = new_ar
+            self.state.aspect_ratio = new_ar
+
+            # Update container immediately
+            if self.display_container:
+                self.display_container.set_aspect_ratio(self.aspect_ratio)
+
+            # Compute how the target render width changes under the same preset height
+            target_w_old, target_h_old = self.rsize.compute_target_size(new_ar)
+
+            # Preserve FOV across aspect ratio change by adjusting zoom to width delta
+            if (prev_w, prev_h) != (target_w_old, target_h_old):
+                self._adjust_zoom_for_resolution_change(prev_w, prev_h,
+                                                        target_w_old,
+                                                        target_h_old)
+                self.log(f"Adjusted zoom to {self.state.zoom:.6g} for aspect {prev_ar:.4g} → {new_ar:.4g}.")
+
+            self.state.center_x = float(self.center_x_input.text())
+            self.state.center_y = float(self.center_y_input.text())
+            self.state.zoom = float(self.zoom_input.text())
+            self.state.zoom_factor = float(self.zoom_factor_input.text())
+            self.log(
+                f"View updated: center=({self.state.center_x:.6g},{self.state.center_y:.6g}), "
+                f"zoom={self.state.zoom:.6g}, zoom_factor={self.state.zoom_factor:.3g}."
+            )
             self.render_fractal()
+        except ValueError as e:
+            self.log(f"Error in view inputs: {e}")
 
     def apply_render_settings(self):
-        """
-        Apply engine/kernel/quality settings and trigger a new render.
-        Keeps the tile-queue pipeline intact.
-        """
         # Ensure renderer exists
         if self.renderer is None:
-            # Lazily create the renderer with the current viewport
             self.render_fractal()
             if self.renderer is None:
-                self.log(
-                    "Renderer was not created; aborting apply_render_settings.")
+                self.log("Renderer was not created; aborting apply_render_settings.")
                 return
 
-        # --- Max iterations & samples ---
+        # Resolution preset
+        old_w, old_h = self._current_render_size()
+        self.rsize.target_quality = self.res_input.currentText()
+        new_w, new_h = self.rsize.compute_target_size(self.aspect_ratio)
+
+        if (new_w, new_h) != (old_w, old_h):
+            self._adjust_zoom_for_resolution_change(old_w, old_h, new_w, new_h)
+            self.log(f"Resolution preset changed to {self.rsize.target_quality}.")
+
+        # Max iter & samples
         try:
             max_iter = int(self.iter_input.currentText())
         except Exception as e:
             self.log(f"{e}; Invalid max_iter input: {self.iter_input.currentText()}.")
             max_iter = self.renderer.max_iter
+
         try:
             samples = int(self.samples_input.currentText())
         except Exception as e:
@@ -423,14 +393,12 @@ class FractalViewer(QMainWindow):
         if self.renderer.max_iter != max_iter:
             self.renderer.set_max_iter(max_iter)
             self.log(f"Set max_iter to {max_iter}.")
-
         if self.renderer.samples != samples:
             self.renderer.set_samples(samples)
             self.log(f"Set samples to {samples}.")
 
-        # --- Engine mode (FULL_FRAME vs TILED) ---
+        # Engine mode
         if self.tile_render_check.isChecked():
-            # Parse tile size safely
             try:
                 tw, th = map(int, self.tile_size_input.text().lower().replace(' ', '').split('x'))
                 if tw <= 0 or th <= 0:
@@ -440,11 +408,11 @@ class FractalViewer(QMainWindow):
                 tw, th = 256, 256
 
             if self.adaptive_enabled:
-                self.apply_adaptive_settings()
+                self._apply_adaptive_settings()
                 opts = dict(self.adaptive_opts)
-                opts.update({"tile_w": tw,  "tile_h": th})
+                opts.update({"tile_w": tw, "tile_h": th})
                 self.renderer.set_engine_mode(EngineMode.TILED, tile_w=tw, tile_h=th, adaptive_opts=opts)
-                self.log(f"Engine: ADAPTIVE TILED ({tw}x{th}) with {opts}.)")
+                self.log(f"Engine: ADAPTIVE TILED ({tw}x{th}) with {opts}.")
             else:
                 self.renderer.set_engine_mode(EngineMode.TILED, tile_w=tw, tile_h=th)
                 self.log(f"Engine: TILED ({tw}x{th}).")
@@ -452,7 +420,7 @@ class FractalViewer(QMainWindow):
             self.renderer.set_engine_mode(EngineMode.FULL_FRAME)
             self.log("Engine: FULL_FRAME.")
 
-        # --- Kernel backend ---
+        # Kernel
         kernel_str = self.kernel_input.currentText().upper()
         if kernel_str == "OPENCL":
             new_kernel = Kernel.OPENCL
@@ -468,14 +436,13 @@ class FractalViewer(QMainWindow):
             self.renderer.set_kernel(new_kernel)
             self.log(f"Kernel set to {kernel_str}.")
 
-        # Trigger a new render with the current viewport
+        # Trigger render
         self.render_fractal()
 
-    def apply_adaptive_settings(self):
-        # parse safely; keep defaults if invalid
+    def _apply_adaptive_settings(self):
         def _get_int(line, default):
             try:
-                v = int(line.text().strip());
+                v = int(line.text().strip())
                 return v if v > 0 else default
             except Exception:
                 return default
@@ -486,54 +453,421 @@ class FractalViewer(QMainWindow):
             except Exception:
                 return default
 
-        self.adaptive_opts["min_tile"] = _get_int(self.min_tile_input,
-                                                  self.adaptive_opts[
-                                                      "min_tile"])
-        self.adaptive_opts["max_tile"] = _get_int(self.max_tile_input,
-                                                  self.adaptive_opts[
-                                                      "max_tile"])
-        self.adaptive_opts["target_ms"] = _get_float(self.target_ms_input,
-                                                     self.adaptive_opts[
-                                                         "target_ms"])
-        self.adaptive_opts["max_depth"] = _get_int(self.max_depth_input,
-                                                   self.adaptive_opts[
-                                                       "max_depth"])
-        self.adaptive_opts["sample_stride"] = _get_int(
-            self.sample_stride_input, self.adaptive_opts["sample_stride"])
+        self.adaptive_opts["min_tile"] = _get_int(self.min_tile_input, self.adaptive_opts["min_tile"])
+        self.adaptive_opts["max_tile"] = _get_int(self.max_tile_input, self.adaptive_opts["max_tile"])
+        self.adaptive_opts["target_ms"] = _get_float(self.target_ms_input, self.adaptive_opts["target_ms"])
+        self.adaptive_opts["max_depth"] = _get_int(self.max_depth_input, self.adaptive_opts["max_depth"])
+        self.adaptive_opts["sample_stride"] = _get_int(self.sample_stride_input, self.adaptive_opts["sample_stride"])
         self.adaptive_opts["parallel"] = bool(self.parallel_chk.isChecked())
-        mw = _get_int(self.max_workers_input,
-                      self.adaptive_opts["max_workers"])
+        mw = _get_int(self.max_workers_input, self.adaptive_opts["max_workers"])
         self.adaptive_opts["max_workers"] = mw if mw >= 0 else 0
-
         self.log(f"Adaptive settings applied: {self.adaptive_opts}")
 
-    # ----------------------- View tab actions -----------------------
-    def apply_view_settings(self):
-        try:
-            self.center_x = float(self.center_x_input.text())
-            self.center_y = float(self.center_y_input.text())
-            self.zoom = float(self.zoom_input.text())
-            self.zoom_factor = float(self.zoom_factor_input.text())
-            self.log(
-                f"View updated: center=({self.center_x:.6g},{self.center_y:.6g}), "
-                f"zoom={self.zoom:.6g}, zoom_factor={self.zoom_factor:.3g}."
+    # ---------- Rendering control ----------
+    def render_fractal(self):
+        # Compute target render size based on preset & aspect
+        render_w, render_h = self.rsize.compute_target_size(self.aspect_ratio)
+
+        # Lazily construct renderer
+        if self.renderer is None:
+            self.renderer = FullImageRenderer(
+                render_w, render_h,
+                palettes[self.default_palette_name],
+                kernel=Kernel.AUTO,
+                max_iter=200, samples=2,
+                coloring_mode=ColoringMode.EXTERIOR,
+                precision=np.float32
             )
+            # New signal signatures (image carries resolution; tiles too)
+            self.renderer.image_updated.connect(self.update_image)
+            self.renderer.tile_ready.connect(self._on_tile_ready)
+            self.renderer.log_text.connect(self.log)
+        else:
+            self.renderer.set_image_size(render_w, render_h)
+
+        # Compute world bounds from render buffer dimensions
+        scale = 1.0 / self.state.zoom
+        min_x = self.state.center_x - (render_w / 2) * scale
+        max_x = self.state.center_x + (render_w / 2) * scale
+        min_y = self.state.center_y - (render_h / 2) * scale
+        max_y = self.state.center_y + (render_h / 2) * scale
+
+        # Precision selection
+        if self.state.zoom > 1e14:
+            precision_mode = Precisions.Arbitrary
+        elif self.state.zoom > 1e6:
+            precision_mode = Precisions.Double
+        else:
+            precision_mode = Precisions.Single
+        self.renderer.set_precision(precision_mode)
+
+        self.log(
+            f"Render frame: size={render_w}x{render_h} "
+            f"(display={self.display.width()}x{self.display.height()}), "
+            f"center=({self.state.center_x:.6g},{self.state.center_y:.6g}), "
+            f"zoom={self.state.zoom:.6g}, precision={precision_mode.name}."
+        )
+
+        self.compositor.clear()
+        self.renderer.render_frame(min_x, max_x, min_y, max_y)
+
+    def _start_final_render(self, cx: float, cy: float, zoom: float):
+        render_w, render_h = self.rsize.compute_target_size(self.aspect_ratio)
+        if zoom == 0:
+            zoom = self.state.zoom
+        scale = 1.0 / zoom
+        min_x = cx - (render_w / 2) * scale
+        max_x = cx + (render_w / 2) * scale
+        min_y = cy - (render_h / 2) * scale
+        max_y = cy + (render_h / 2) * scale
+
+        # Precision
+        if zoom > 1e14:
+            precision_mode = Precisions.Arbitrary
+        elif zoom > 1e6:
+            precision_mode = Precisions.Double
+        else:
+            precision_mode = Precisions.Single
+        self.renderer.set_precision(precision_mode)
+        self.renderer.set_image_size(render_w, render_h)
+
+        self.log(
+            f"Final render scheduled: size={render_w}x{render_h} "
+            f"(display={self.display.width()}x{self.display.height()}), "
+            f"center=({cx:.6g},{cy:.6g}), zoom={zoom:.6g}, "
+            f"precision={precision_mode.name}."
+        )
+        self.compositor.clear()
+        self.renderer.render_frame(min_x, max_x, min_y, max_y)
+
+    # ---------- Renderer callbacks ----------
+    def update_image(self, image: QImage, render_w: int, render_h: int):
+        """
+        Full-frame updates (both FULL_FRAME and TILED final frame).
+        """
+        self.state.set_frame_size(render_w, render_h)
+        self.log(f"Image updated from renderer (frame={render_w}x{render_h}).")
+
+        # Guard against premature sizing
+        if self.display.width() <= 0 or self.display.height() <= 0 or image is None or image.isNull():
+            self.view_image = image
+            scaled = QPixmap.fromImage(image).scaled(
+                max(1, self.display.width()),
+                max(1, self.display.height()),
+                Qt.AspectRatioMode.IgnoreAspectRatio,  # label already has the right aspect
+                Qt.TransformationMode.SmoothTransformation
+            )
+            self.display.setPixmap(scaled)
+            return
+
+        # Cache & present (fade)
+        self.cached_image = image
+        if not (self.animation_timer and self.animation_timer.isActive()):
+            self._fade_in_image(self.cached_image)
+            self.view_image = self.cached_image
+            self.cached_image = None
+            # Keep compositor's committed copy in sync
+            self.compositor.view_image = self.view_image
+        else:
+            self.final_render_pending = True
+
+    def _on_tile_ready(self, gen: int, x: int, y: int, tile_qimg: QImage, frame_w: int, frame_h: int):
+        # Route to compositor
+        self.compositor.on_tile_ready(gen, x, y, tile_qimg, frame_w, frame_h)
+
+    # ---------- Input & animation ----------
+    def wheelEvent(self, event: QWheelEvent):
+        local = self.display.mapFromGlobal(event.globalPosition().toPoint())
+        if local.x() < 0 or local.y() < 0 or local.x() >= self.display.width() or local.y() >= self.display.height():
+            return
+        if not self.wheel_zoom_tool.isChecked():
+            return
+
+        lw, lh = self.display.width(), self.display.height()
+        pxu_x, pxu_y = self.state.pixels_per_unit_xy(lw, lh)
+
+        zoom_in = event.angleDelta().y() > 0
+        factor = self.state.zoom_factor if zoom_in else (1 / self.state.zoom_factor)
+        self.target_zoom = self.state.zoom * factor
+
+        dx_world, dy_world = self.state.world_delta_from_label_px(local.x() - lw / 2, local.y() - lh / 2, lw, lh)
+        self.target_x = self.state.center_x + dx_world
+        self.target_y = self.state.center_y + dy_world
+
+        self.tile_render_check.setChecked(True)
+        self.update_view()
+
+    def mousePressEvent(self, event):
+        if not self.display.geometry().contains(event.pos()):
+            return
+        local = self.display.mapFrom(self, event.pos())
+        lw, lh = self.display.width(), self.display.height()
+        dx_world, dy_world = self.state.world_delta_from_label_px(local.x() - lw / 2, local.y() - lh / 2, lw, lh)
+        self.target_x = self.state.center_x + dx_world
+        self.target_y = self.state.center_y + dy_world
+
+        if event.button() == Qt.MouseButton.LeftButton:
+            if self.drag_tool.isChecked():
+                self.dragging = True
+                self.last_mouse_pos = local
+                self.start_center_x = self.state.center_x
+                self.start_center_y = self.state.center_y
+
+            if self.set_center_tool.isChecked():
+                self.target_zoom = self.state.zoom
+                self.update_view()
+
+            if self.click_zoom_tool.isChecked():
+                self.target_zoom = self.state.zoom * self.state.zoom_factor
+                self.update_view()
+
+        if event.button() == Qt.MouseButton.RightButton and self.click_zoom_tool.isChecked():
+            self.target_zoom = self.state.zoom / self.state.zoom_factor
+            self.update_view()
+
+    def mouseMoveEvent(self, event):
+        if self.dragging and self.view_image and self.drag_tool.isChecked():
+            local = self.display.mapFrom(self, event.pos())
+            lw, lh = self.display.width(), self.display.height()
+
+            dx_px = local.x() - self.last_mouse_pos.x()
+            dy_px = local.y() - self.last_mouse_pos.y()
+            dx_world, dy_world = self.state.world_delta_from_label_px(dx_px, dy_px, lw, lh)
+
+            current_center_x = self.start_center_x - dx_world
+            current_center_y = self.start_center_y - dy_world
+
+            pixmap = QPixmap.fromImage(self.view_image).scaled(
+                lw, lh,
+                Qt.AspectRatioMode.IgnoreAspectRatio,
+                Qt.TransformationMode.SmoothTransformation
+            )
+            final_pixmap = QPixmap(self.display.size())
+            final_pixmap.fill(Qt.GlobalColor.black)
+            painter = QPainter(final_pixmap)
+            painter.drawPixmap(dx_px, dy_px, pixmap)
+            painter.end()
+            self.display.setPixmap(final_pixmap)
+
+            self.state.center_x = current_center_x
+            self.state.center_y = current_center_y
+            self._update_view_tab_fields()
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton and self.dragging and self.drag_tool.isChecked():
+            self.dragging = False
+            self.target_x, self.target_y = self.state.center_x, self.state.center_y
+            self.target_zoom = self.state.zoom
+            # Commit the preview as current view image
+            self.view_image = self.display.pixmap().toImage().copy()
+            self.compositor.view_image = self.view_image
             self.render_fractal()
-        except ValueError as e:
-            self.log(f"Error in view inputs: {e}")
 
-    def update_view_tab_fields(self):
+    def update_view(self):
+        if not getattr(self, "view_image", None):
+            return
+
+        # Trigger the final render at the target view immediately
+        self.compositor.set_paused(True)
+        if self.precompute_during:
+            self._start_final_render(self.target_x, self.target_y, self.target_zoom)
+
+        # Fix an animation base for the whole animation
+        self.anim_base = self.view_image.copy()
+
+        # Setup animation
+        self.start_x, self.start_y, self.start_zoom = self.state.center_x, self.state.center_y, self.state.zoom
+        self._update_view_tab_fields()
+        self.phase = 0 if self.target_zoom > self.state.zoom else 1
+        self.current_step = 0
+        self.animation_active = True
+        if self.animation_timer is None:
+            self.animation_timer = QTimer()
+            self.animation_timer.timeout.connect(self._perform_anim_step)
+        self.animation_timer.start(self.anim_interval)
+
+    def _perform_anim_step(self):
+        self.current_step += 1
+        half = self.animation_steps // 2
+        t = (self.current_step / half) if self.current_step <= half else ((self.current_step - half) / half)
+        eased_t = t * t * (3 - 2 * t)
+
+        if getattr(self, "anim_base", None) is not None:
+            base_pixmap = QPixmap.fromImage(self.anim_base)
+
+            if self.phase == 0:
+                self._pan_step(eased_t, base_pixmap)
+            elif self.phase == 1:
+                self._zoom_step(eased_t, base_pixmap)
+
+        if self.current_step == half:
+            if self.phase == 0:
+                self.state.center_x, self.state.center_y = self.target_x, self.target_y
+                self._update_view_tab_fields()
+                self.phase = 1
+            elif self.phase == 1:
+                self.state.zoom = self.target_zoom
+                self._update_view_tab_fields()
+                self.phase = 0
+            self.anim_base = self.display.pixmap().toImage().copy()
+
+        if self.current_step >= self.animation_steps:
+            self.animation_timer.stop()
+            self.state.center_x, self.state.center_y, self.state.zoom = self.target_x, self.target_y, self.target_zoom
+            self._update_view_tab_fields()
+            self.animation_active = False
+            self.view_image = self.display.pixmap().toImage().copy()
+            self.compositor.view_image = self.view_image
+
+            self.compositor.set_paused(False)
+            self.compositor.flush()
+
+            if not self.precompute_during:
+                self.render_fractal()
+
+            if self.final_render_pending:
+                self.final_render_pending = False
+                self._fade_in_image(self.cached_image)
+                self.view_image = self.cached_image
+                self.compositor.view_image = self.view_image
+                self.cached_image = None
+
+    def _pan_step(self, eased_t, pixmap: QPixmap):
+        lw, lh = self.display.width(), self.display.height()
+        scaled_pixmap = pixmap.scaled(
+            lw, lh,
+            Qt.AspectRatioMode.IgnoreAspectRatio,
+            Qt.TransformationMode.SmoothTransformation
+        )
+        pxu_x, pxu_y = self.state.pixels_per_unit_xy(lw, lh)
+
+        interp_x = self.start_x + (self.target_x - self.start_x) * eased_t
+        interp_y = self.start_y + (self.target_y - self.start_y) * eased_t
+
+        dx_px = int(round((interp_x - self.start_x) * pxu_x))
+        dy_px = int(round((interp_y - self.start_y) * pxu_y))
+
+        final_pixmap = QPixmap(self.display.size())
+        final_pixmap.fill(Qt.GlobalColor.black)
+        painter = QPainter(final_pixmap)
+        painter.drawPixmap(-dx_px, -dy_px, scaled_pixmap)
+        painter.end()
+        self.display.setPixmap(final_pixmap)
+
+        self.state.center_x = interp_x
+        self.state.center_y = interp_y
+        self._update_view_tab_fields()
+
+    def _zoom_step(self, eased_t, pixmap: QPixmap):
+        lw, lh = self.display.width(), self.display.height()
+        interp_zoom = self.start_zoom + (self.target_zoom - self.start_zoom) * eased_t
+        scale_factor = interp_zoom / self.start_zoom
+
+        scaled_w = int(round(lw * scale_factor))
+        scaled_h = int(round(lh * scale_factor))
+        scaled_pixmap = pixmap.scaled(
+            scaled_w, scaled_h,
+            Qt.AspectRatioMode.IgnoreAspectRatio,
+            Qt.TransformationMode.SmoothTransformation
+        )
+        dx = (lw - scaled_pixmap.width()) // 2
+        dy = (lh - scaled_pixmap.height()) // 2
+
+        final_pixmap = QPixmap(self.display.size())
+        final_pixmap.fill(Qt.GlobalColor.black)
+        painter = QPainter(final_pixmap)
+        painter.drawPixmap(dx, dy, scaled_pixmap)
+        painter.end()
+        self.display.setPixmap(final_pixmap)
+
+        self.state.zoom = interp_zoom
+        self._update_view_tab_fields()
+
+    # ---------- Utilities ----------
+    def save_image(self):
+        if self.view_image:
+            path, _ = QFileDialog.getSaveFileName(
+                self, "Save Image",
+                f"mandelbrot_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png",
+                "PNG Files (*.png)"
+            )
+            if path:
+                self.view_image.save(path)
+                self.log(f"Saved image to {path}.")
+
+    def _fade_in_image(self, image: QImage):
+        if self.display.width() <= 0 or self.display.height() <= 0 or image is None or image.isNull():
+            self.view_image = image
+            scaled = QPixmap.fromImage(image).scaled(
+                max(1, self.display.width()),
+                max(1, self.display.height()),
+                Qt.AspectRatioMode.IgnoreAspectRatio,
+                Qt.TransformationMode.SmoothTransformation
+            )
+            self.display.setPixmap(scaled)
+            return
+
+        old_image = self.view_image
+        new_image = image
+        width, height = self.display.width(), self.display.height()
+
+        anim = QPropertyAnimation(self, b"dummy")
+        anim.setDuration(400)
+        anim.setStartValue(0.0)
+        anim.setEndValue(1.0)
+        anim.setEasingCurve(QEasingCurve.Type.Linear)
+
+        def update_blend(value):
+            final_pixmap = QPixmap(self.display.size())
+            if final_pixmap.isNull():
+                scaled = QPixmap.fromImage(new_image).scaled(
+                    width, height,
+                    Qt.AspectRatioMode.IgnoreAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation
+                )
+                self.display.setPixmap(scaled)
+                return
+            final_pixmap.fill(Qt.GlobalColor.black)
+            painter = QPainter(final_pixmap)
+            if old_image and not old_image.isNull():
+                old_pixmap = QPixmap.fromImage(old_image).scaled(
+                    width, height,
+                    Qt.AspectRatioMode.IgnoreAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation
+                )
+                painter.setOpacity(1.0 - value)
+                painter.drawPixmap(0, 0, old_pixmap)
+            new_pixmap = QPixmap.fromImage(new_image).scaled(
+                width, height,
+                Qt.AspectRatioMode.IgnoreAspectRatio,
+                Qt.TransformationMode.SmoothTransformation
+            )
+            painter.setOpacity(value)
+            painter.drawPixmap(0, 0, new_pixmap)
+            painter.end()
+            self.display.setPixmap(final_pixmap)
+
+        anim.valueChanged.connect(update_blend)
+
+        def finalize():
+            self.view_image = new_image
+            scaled = QPixmap.fromImage(new_image).scaled(
+                width, height,
+                Qt.AspectRatioMode.IgnoreAspectRatio,
+                Qt.TransformationMode.SmoothTransformation
+            )
+            self.display.setPixmap(scaled)
+            self.compositor.view_image = self.view_image
+
+        anim.finished.connect(finalize)
+        self.fade_anim = anim
+        self.fade_anim.start()
+
+    def _update_view_tab_fields(self):
         if hasattr(self, "center_x_input") and hasattr(self, "center_y_input") and hasattr(self, "zoom_input"):
-            self.center_x_input.setText(str(self.center_x))
-            self.center_y_input.setText(str(self.center_y))
-            self.zoom_input.setText(str(self.zoom))
-
-    def log(self, msg: str):
-        timestamp = datetime.now().strftime("%H:%M:%S.%f")[:-3]
-        line = f"[{timestamp}] {msg}"
-        self.log_view.appendPlainText(line)
-        if self.log_autoscroll_chk.isChecked():
-            self.log_view.moveCursor(QTextCursor.End)
+            self.center_x_input.setText(str(self.state.center_x))
+            self.center_y_input.setText(str(self.state.center_y))
+            self.zoom_input.setText(str(self.state.zoom))
 
     def set_tools(self, tool):
         if tool == Tools.Drag:
@@ -554,424 +888,62 @@ class FractalViewer(QMainWindow):
             self.click_zoom_tool.setChecked(False)
         self.log(f"Selected tool {tool.name}.")
 
-    # ----------------------- Save Image / Updates -----------------------
-    def save_image(self):
-        if self.view_image:
-            path, _ = QFileDialog.getSaveFileName(
-                self, "Save Image",
-                f"mandelbrot_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png",
-                "PNG Files (*.png)"
-            )
-            if path:
-                self.view_image.save(path)
-                self.log(f"Saved image to {path}.")
+    def log(self, msg: str):
+        timestamp = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+        line = f"[{timestamp}] {msg}"
+        self.log_view.appendPlainText(line)
+        if self.log_autoscroll_chk.isChecked():
+            self.log_view.moveCursor(QTextCursor.MoveOperation.End)
 
-    def update_image(self, image: QImage):
+    def _current_render_size(self) -> tuple[int, int]:
         """
-        Full-frame updates from renderer:
-        - FULL_FRAME engine: normal final frame.
-        - TILED engine: usually final frame when tiles are done.
+        Returns the most reliable current render size:
+        - Prefer the latest frame size stored in state (from renderer callbacks).
+        - Else fall back to renderer's configured size.
+        - Else compute from policy as a last resort.
         """
-        self.log("Image updated from renderer.")
+        if self.state.frame_w and self.state.frame_h:
+            return int(self.state.frame_w), int(self.state.frame_h)
+        if self.renderer is not None:
+            return int(self.renderer.width), int(self.renderer.height)
+        return self.rsize.compute_target_size(self.aspect_ratio)
 
-        # Guard: label is not yet sized or image null
-        if self.label.width() <= 0 or self.label.height() <= 0 or image is None or image.isNull():
-            self.view_image = image
-            self.label.setPixmap(QPixmap.fromImage(image))
-            return
+    def _adjust_zoom_for_resolution_change(self, old_w: int, old_h: int,
+                                           new_w: int, new_h: int) -> None:
+        """
+        Adjust zoom so the world field of view stays the same when resolution changes.
+        We preserve horizontal FOV: zoom' = zoom * (new_w / old_w).
+        """
+        old_w = max(1, int(old_w))
+        new_w = max(1, int(new_w))
+        factor = float(new_w) / float(old_w)
+        self.state.zoom *= factor
+        # reflect in UI
+        if hasattr(self, "zoom_input"):
+            self.zoom_input.setText(str(self.state.zoom))
 
-        # Set new image to cache
-        self.cached_image = image
-
-        # If we’re idle (no animation in progress), show it now
-        if not (self.animation_timer and self.animation_timer.isActive()):
-            self._fade_in_image(self.cached_image)
-            self.view_image = self.cached_image
-            self.cached_image = None
-        else:
-            self.final_render_pending = True
-
-    def _fade_in_image(self, image: QImage):
-        # If the label is not sized yet, set directly
-        if self.label.width() <= 0 or self.label.height() <= 0 or image is None or image.isNull():
-            self.view_image = image
-            self.label.setPixmap(QPixmap.fromImage(image))
-            return
-
-        old_image = self.view_image
-        new_image = image
-        width, height = self.label.width(), self.label.height()
-
-        anim = QPropertyAnimation(self, b"dummy")  # dummy property
-        anim.setDuration(400)
-        anim.setStartValue(0.0)
-        anim.setEndValue(1.0)
-        anim.setEasingCurve(QEasingCurve.Linear)
-
-        def update_blend(value):
-            final_pixmap = QPixmap(self.label.size())
-            if final_pixmap.isNull():
-                self.label.setPixmap(QPixmap.fromImage(new_image))
-                return
-            final_pixmap.fill(Qt.GlobalColor.black)
-            painter = QPainter(final_pixmap)
-
-            if old_image and not old_image.isNull():
-                old_pixmap = QPixmap.fromImage(old_image).scaled(
-                    width, height,
-                    Qt.AspectRatioMode.KeepAspectRatio,
-                    Qt.TransformationMode.SmoothTransformation
-                )
-                painter.setOpacity(1.0 - value)
-                painter.drawPixmap(0, 0, old_pixmap)
-
-            new_pixmap = QPixmap.fromImage(new_image).scaled(
-                width, height,
-                Qt.AspectRatioMode.KeepAspectRatio,
-                Qt.TransformationMode.SmoothTransformation
-            )
-            painter.setOpacity(value)
-            painter.drawPixmap(0, 0, new_pixmap)
-            painter.end()
-
-            self.label.setPixmap(final_pixmap)
-
-        anim.valueChanged.connect(update_blend)
-
-        def finalize():
-            self.view_image = new_image
-            self.label.setPixmap(QPixmap.fromImage(new_image))
-
-        anim.finished.connect(finalize)
-        self.fade_anim = anim
-        self.fade_anim.start()
-
-    # ----------------------- View change / Animation -----------------------
-    def update_view(self):
-        if not getattr(self, "view_image", None):
-            return
-
-        # Start the final render immediately (tiles start computing)
-        self._start_final_render(self.target_x, self.target_y, self.target_zoom)
-
-        # Fix an animation base for the whole animation
-        self.anim_base = self.view_image.copy()
-
-        # Setup animation
-        self.start_x, self.start_y, self.start_zoom = self.center_x, self.center_y, self.zoom
-        self.update_view_tab_fields()
-        self.phase = 0 if self.target_zoom > self.zoom else 1
-        self.current_step = 0
-
-        self.animation_active = True
-        if self.animation_timer is None:
-            self.animation_timer = QTimer()
-            self.animation_timer.timeout.connect(self._perform_anim_step)
-        self.animation_timer.start(self.anim_interval)
-
-    def _start_final_render(self, cx, cy, zoom):
-        # Guard: avoid division by zero (e.g., Set-Center without zoom change)
-        if zoom == 0:
-            zoom = self.zoom
-
-        scale = 1.0 / zoom
-        min_x = cx - (self.label.width() / 2) * scale
-        max_x = cx + (self.label.width() / 2) * scale
-        min_y = cy - (self.label.height() / 2) * scale
-        max_y = cy + (self.label.height() / 2) * scale
-
-        # Precision
-        if zoom > 1e14:
-            precision_mode = Precisions.Arbitrary
-        elif zoom > 1e6:
-            precision_mode = Precisions.Double
-        else:
-            precision_mode = Precisions.Single
-        self.renderer.set_precision(precision_mode)
-
-        self.log(
-            f"Final render scheduled: center=({cx:.6g},{cy:.6g}), "
-            f"zoom={zoom:.6g}, precision={precision_mode.name}."
-        )
-
-        self.tiles_start_time = None
-        self.tiles_processed = 0
-
-        self._clear_tile_queue()
-        self.renderer.render_frame(min_x, max_x, min_y, max_y)
-
-    def _perform_anim_step(self):
-        self.current_step += 1
-
-        if self.current_step <= self.animation_steps // 2:
-            t = self.current_step / (self.animation_steps // 2)
-        else:
-            t = (self.current_step - (self.animation_steps // 2)) / (
-                        self.animation_steps // 2)
-        eased_t = t * t * (3 - 2 * t)
-
-        # Always render from the fixed base captured at animation start
-        if self.anim_base is not None:
-            base_pixmap = QPixmap.fromImage(self.anim_base)
-            if self.phase == 0:
-                self._pan_step(eased_t, base_pixmap)
-            elif self.phase == 1:
-                self._zoom_step(eased_t, base_pixmap)
-
-        # Phase change at midpoint
-        if self.current_step == self.animation_steps // 2:
-            if self.phase == 0:
-                self.center_x, self.center_y = self.target_x, self.target_y
-                self.update_view_tab_fields()
-                self.phase = 1
-            elif self.phase == 1:
-                self.zoom = self.target_zoom
-                self.update_view_tab_fields()
-                self.phase = 0
-            self.anim_base = self.label.pixmap().toImage().copy()
-
-        # Animation complete
-        if self.current_step >= self.animation_steps:
-            self.animation_timer.stop()
-            self.center_x, self.center_y, self.zoom = self.target_x, self.target_y, self.target_zoom
-            self.update_view_tab_fields()
-
-            self.animation_active = False
-
-            # Clear transient animation base
-            self.view_image = self.label.pixmap().toImage().copy()
-            self.anim_base = None
-
-            if self.final_render_pending:
-                self.final_render_pending = False
-                self._fade_in_image(self.cached_image)
-                self.view_image = self.cached_image
-                self.cached_image = None
-
-    def _pan_step(self, eased_t, pixmap):
-        interp_x = self.start_x + (self.target_x - self.start_x) * eased_t
-        interp_y = self.start_y + (self.target_y - self.start_y) * eased_t
-        dx = int((interp_x - self.start_x) * self.zoom)
-        dy = int((interp_y - self.start_y) * self.zoom)
-
-        final_pixmap = QPixmap(self.label.size())
-        final_pixmap.fill(Qt.GlobalColor.black)
-        painter = QPainter(final_pixmap)
-        painter.drawPixmap(-dx, -dy, pixmap)
-        painter.end()
-        self.label.setPixmap(final_pixmap)
-
-        self.center_x = interp_x
-        self.center_y = interp_y
-        self.update_view_tab_fields()
-
-    def _zoom_step(self, eased_t, pixmap: QPixmap):
-        interp_zoom = self.start_zoom + (self.target_zoom - self.start_zoom) * eased_t
-        scale_factor = interp_zoom / self.start_zoom
-
-        scaled_width = int(self.label.width() * scale_factor)
-        scaled_height = int(self.label.height() * scale_factor)
-        scaled_pixmap = pixmap.scaled(
-            scaled_width, scaled_height,
-            Qt.AspectRatioMode.KeepAspectRatio,
-            Qt.TransformationMode.SmoothTransformation
-        )
-
-        dx = int(self.label.width() / 2 - scaled_pixmap.width() / 2)
-        dy = int(self.label.height() / 2 - scaled_pixmap.height() / 2)
-
-        final_pixmap = QPixmap(self.label.size())
-        final_pixmap.fill(Qt.GlobalColor.black)
-        painter = QPainter(final_pixmap)
-        painter.drawPixmap(dx, dy, scaled_pixmap)
-        painter.end()
-        self.label.setPixmap(final_pixmap)
-
-        self.zoom = interp_zoom
-        self.update_view_tab_fields()
-
-    # ----------------------- Input handling -----------------------
-    def wheelEvent(self, event):
-        if not self.label.geometry().contains(event.pos()):
-            return
-        if not self.wheel_zoom_tool.isChecked():
-            return
-
-        zoom_in = event.angleDelta().y() > 0
-        zoom_factor = self.zoom_factor if zoom_in else (1 / self.zoom_factor)
-        mouse_pos = event.pos()
-
-        self.target_zoom = self.zoom * zoom_factor
-        self.target_x = self.center_x + (mouse_pos.x() - self.label.width() / 2) / self.zoom
-        self.target_y = self.center_y + (mouse_pos.y() - self.label.height() / 2) / self.zoom
-
-        self.tile_render_check.setChecked(True)
-
-        self.update_view()
-
-    def mousePressEvent(self, event):
-        if self.label.geometry().contains(event.pos()):
-            mouse_pos = event.pos()
-            self.target_x = self.center_x + (mouse_pos.x() - self.label.width() / 2) / self.zoom
-            self.target_y = self.center_y + (mouse_pos.y() - self.label.height() / 2) / self.zoom
-
-            if event.button() == Qt.MouseButton.LeftButton:
-                if self.drag_tool.isChecked():
-                    self.dragging = True
-                    self.last_mouse_pos = event.pos()
-                    self.start_center_x = self.center_x
-                    self.start_center_y = self.center_y
-                if self.set_center_tool.isChecked():
-                    # Ensure the zoom stays unchanged when only the center changes
-                    self.target_zoom = self.zoom
-                    self.update_view()
-                if self.click_zoom_tool.isChecked():
-                    self.target_zoom = self.zoom * self.zoom_factor
-                    self.update_view()
-
-            if event.button() == Qt.MouseButton.RightButton:
-                if self.click_zoom_tool.isChecked():
-                    self.target_zoom = self.zoom / self.zoom_factor
-                    self.update_view()
-
-    def mouseMoveEvent(self, event):
-        if self.dragging and self.view_image and self.drag_tool.isChecked():
-            dx = event.x() - self.last_mouse_pos.x()
-            dy = event.y() - self.last_mouse_pos.y()
-
-            current_center_x = self.start_center_x - dx / self.zoom
-            current_center_y = self.start_center_y - dy / self.zoom
-
-            pixmap = QPixmap.fromImage(self.view_image)
-            scaled_pixmap = pixmap.scaled(
-                self.label.width(),
-                self.label.height(),
-                Qt.AspectRatioMode.KeepAspectRatio,
-                Qt.TransformationMode.SmoothTransformation
-            )
-
-            final_pixmap = QPixmap(self.label.size())
-            final_pixmap.fill(Qt.GlobalColor.black)
-            painter = QPainter(final_pixmap)
-            painter.drawPixmap(dx, dy, scaled_pixmap)
-            painter.end()
-
-            self.label.setPixmap(final_pixmap)
-
-            self.center_x = current_center_x
-            self.center_y = current_center_y
-            self.update_view_tab_fields()
-
-    def mouseReleaseEvent(self, event):
-        if event.button() == Qt.MouseButton.LeftButton and self.dragging and self.drag_tool.isChecked():
-            self.dragging = False
-            self.target_x, self.target_y = self.center_x, self.center_y
-            self.target_zoom = self.zoom
-            self.view_image = self.label.pixmap().toImage().copy()
-            self.render_fractal()
-
-    # ----------------------- Window actions -----------------------
+    # ---------- Qt events ----------
     def resizeEvent(self, event):
+        # No longer force renderer to label size; aspect container takes care of label geometry.
+        super().resizeEvent(event)
+        # Optionally: trigger a re-render after resize debounce
         if not hasattr(self, "resize_timer"):
             self.resize_timer = QTimer()
             self.resize_timer.setSingleShot(True)
             self.resize_timer.timeout.connect(self.render_fractal)
-
-        if self.label.width() > 0 and self.label.height() > 0:
-            if self.renderer is not None:
-                self._clear_tile_queue()
-                self.renderer.set_image_size(self.label.width(), self.label.height())
-            self.log(f"Viewport resized: {self.label.width()}x{self.label.height()} (renderer size updated).")
-
-            if self.view_image:
-                scaled_pixmap = QPixmap.fromImage(self.view_image).scaled(
-                    self.label.size(),
-                    Qt.AspectRatioMode.IgnoreAspectRatio,
-                    Qt.TransformationMode.SmoothTransformation
-                )
-                self.label.setPixmap(scaled_pixmap)
-
         self.resize_timer.start(250)
-        super().resizeEvent(event)
 
     def closeEvent(self, event):
         if self.renderer:
             self.renderer.stop()
         event.accept()
 
-    # ----------------------- Tile queue plumbing -----------------------
-    def _on_tile_ready(self, gen: int, x: int, y: int, tile_qimg: QImage):
-        key = (gen, x, y, tile_qimg.width(), tile_qimg.height())
-        if key in self.tile_index:
-            idx = self.tile_index[key]
-            self.tile_queue[idx] = (gen, x, y, tile_qimg)
-        else:
-            self.tile_queue.append((gen, x, y, tile_qimg))
-            self.tile_index[key] = len(self.tile_queue) - 1
 
-        if self.tiles_start_time is None:
-            self.tiles_start_time = time.time()
-        self.tiles_processed += 1
-
-        # Overlay
-        if self.show_tile_overlay:
-            self.tile_overlay_rects.append((x, y, tile_qimg.width(), tile_qimg.height()))
-
-        if not self.animation_active and not self.tile_flush_timer.isActive():
-            self.tile_flush_timer.start()
-
-    def _flush_tile_queue(self):
-        if self.animation_active:
-            return
-
-        if self.tiles_start_time:
-            dt = max(1e-3, time.time() - self.tiles_start_time)
-            tps = self.tiles_processed / dt
-            self.stats_label.setText(f"Tiles: {self.tiles_processed} | Tiles/sec: {tps:.1f}")
-
-        if self.cached_image is None:
-            if self.view_image is not None:
-                self.cached_image = self.view_image.copy()
-            else:
-                self.cached_image = QImage(self.label.width(), self.label.height(), QImage.Format_RGB32)
-                self.cached_image.fill(Qt.GlobalColor.black)
-
-        budget = min(16, len(self.tile_queue))
-        painter = QPainter(self.cached_image)
-        for _ in range(budget):
-            gen, x, y, tile_qimg = self.tile_queue.popleft()
-            key = (gen, x, y, tile_qimg.width(), tile_qimg.height())
-            self.tile_index.pop(key, None)
-            painter.drawImage(x, y, tile_qimg)
-        painter.end()
-
-        if self.show_tile_overlay and self.tile_overlay_rects:
-            painter = QPainter(self.cached_image)
-            painter.setPen(Qt.GlobalColor.red)
-            overlay_budget = min(64, len(self.tile_overlay_rects))
-            for _ in range(overlay_budget):
-                x, y, w, h = self.tile_overlay_rects.popleft()
-                painter.drawRect(x, y, w, h)
-            painter.end()
-
-        self.label.setPixmap(QPixmap.fromImage(self.cached_image))
-
-        if not self.tile_queue:
-            self.tile_flush_timer.stop()
-            self.view_image = self.cached_image.copy()
-            self.cached_image = None
-
-    def _clear_tile_queue(self):
-        self.tile_queue.clear()
-        self.tile_index.clear()
-        if self.tile_flush_timer.isActive():
-            self.tile_flush_timer.stop()
-        self.cached_image = None
-
-
+# =============================================================================
+# Entrypoint
+# =============================================================================
 if __name__ == "__main__":
     app = QApplication(sys.argv)
     viewer = FractalViewer()
     viewer.show()
     viewer.render_fractal()
-    sys.exit(app.exec_())

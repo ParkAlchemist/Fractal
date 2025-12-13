@@ -82,9 +82,9 @@ class TileEngine(BaseRenderEngine):
 
 class AdaptiveTileEngine(BaseRenderEngine):
     """
-    Dynamic tiling via quadtree + priority queue.
+    Dynamic tiling via quadtree and priority queue.
     - Starts with coarse tiles (max_tile).
-    - Measures cost & variance, then splits expensive tiles (2x2).
+    - Measures cost and variance, then splits expensive tiles (2x2).
     - Prioritization handled by TileScheduler
     - Can run sequentially or with a thread pool for parallel speed.
 
@@ -153,7 +153,7 @@ class AdaptiveTileEngine(BaseRenderEngine):
         self.scheduler.update_view(W, H, viewport, self._last_viewport)
         self._last_viewport = viewport
 
-        # Root tiles: choose a coarse tiling (e.g., 1x1 or 2x2 of max_tile-ish blocks)
+        # Root tiles: choose coarse tiling (e.g., 1x1 or 2x2 of max_tile-ish blocks)
         roots = self._seed_root_tiles(W, H, self.max_tile)
 
         self.scheduler.clear()
@@ -212,12 +212,12 @@ class AdaptiveTileEngine(BaseRenderEngine):
             while True:
 
                 if cancel_cb is not None and cancel_cb():
-                    # Current operation has become obsolete -> return
+                    # The current operation has become obsolete -> return
                     break
 
                 popped = self.scheduler.pop_next()
                 if popped is None and not inflight:
-                    # Queue empty and all tasks done -> return
+                    # Queue empties, and all tasks done -> return
                     break
 
                 while popped is not None and (executor is None or len(inflight) < workers):
@@ -294,7 +294,7 @@ class AdaptiveTileEngine(BaseRenderEngine):
 
     @staticmethod
     def _align_32(n):
-        # Round down to nearest multiple of 32
+        # Round down to the nearest multiple of 32
         return max((n // 32) * 32, 32)
 
     def _should_split(self, tile_iters, t_ms, w, h):

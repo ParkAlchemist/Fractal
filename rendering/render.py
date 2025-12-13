@@ -15,12 +15,13 @@ from coloring.smooth_escape import SmoothEscapeColoring
 from fractals.fractal_base import Viewport, RenderSettings
 from fractals.mandelbrot import MandelbrotFractal
 from rendering.renderer_core import Renderer
-from rendering.render_engines import FullFrameEngine, TileEngine, AdaptiveTileEngine
+from rendering.render_engines import (FullFrameEngine, TileEngine,
+                                      AdaptiveTileEngine)
 
 # --- Workers ---------------------------------------------------------------
 
 class FullImageRenderWorker(QThread):
-    iter_calc_done = Signal(np.ndarray)
+    iter_calc_done = Signal(np.ndarray, int, int)
 
     def __init__(self, renderer: Renderer, viewport: Viewport):
         super().__init__()
@@ -34,15 +35,18 @@ class FullImageRenderWorker(QThread):
         data = self.renderer.render(self.viewport)
         if not data.flags["C_CONTIGUOUS"]:
             data = data.copy()
-        self.iter_calc_done.emit(data)
+        self.iter_calc_done.emit(data,
+                                 self.viewport.width, self.viewport.height)
 
     def stop(self):
         self._running = False
 
 
 class ProgressiveTileRenderWorker(QThread):
-    tile_done = Signal(int, int, int, int, np.ndarray, int)
-    finished_frame = Signal(np.ndarray, int)
+    # (x0, y0, w, h, tile_data, seq_num, frame_w, frame_h)
+    tile_done = Signal(int, int, int, int, np.ndarray, int, int, int)
+    # (frame_data, seq_num, frame_w, frame_h)
+    finished_frame = Signal(np.ndarray, int, int, int)
 
     def __init__(self, renderer: Renderer, viewport: Viewport, seq: int):
         super().__init__()
@@ -61,7 +65,8 @@ class ProgressiveTileRenderWorker(QThread):
         fractal = self.renderer.fractal
         settings = self.renderer.settings
 
-        canvas = np.zeros((self.viewport.height, self.viewport.width), dtype=settings.precision)
+        canvas = np.zeros((self.viewport.height, self.viewport.width),
+                          dtype=settings.precision)
 
         def cancel_cb():
             return self._stop
@@ -70,20 +75,24 @@ class ProgressiveTileRenderWorker(QThread):
             with self.tile_lock:
                 h, w = tile.shape
                 canvas[y0:y0 + h, x0:x0 + w] = tile
-                self.tile_done.emit(x0, y0, w, h, tile, self.seq)
+                self.tile_done.emit(x0, y0, w, h, tile, self.seq,
+                                    self.viewport.width, self.viewport.height)
 
         engine.on_tile = on_tile
         engine.render(fractal, backend, settings, self.viewport, cancel_cb=cancel_cb)
 
         if not self._stop:
-            self.finished_frame.emit(canvas, self.seq)
+            self.finished_frame.emit(canvas, self.seq,
+                                     self.viewport.width, self.viewport.height)
 
 
 # --- Renderer facade -------------------------------------------------------
 
 class FullImageRenderer(QObject):
-    image_updated = Signal(QImage)                 # final full frame / full-frame mode
-    tile_ready = Signal(int, int, int, QImage)   # (gen_id, x, y, tile QImage)
+    # (full_frame, render_w, render_h)
+    image_updated = Signal(QImage, int, int)
+    # (gen_id, x, y, tile QImage, frame_w, frame_h)
+    tile_ready = Signal(int, int, int, QImage, int, int)
     log_text = Signal(str)
 
     def __init__(self, width, height, palette, kernel=Kernel.AUTO,
@@ -124,6 +133,8 @@ class FullImageRenderer(QObject):
         self._start_time = None
         self._stop_flag = False
 
+        self._last_frame_size = (width, height)
+
     # -- Backend selection
     @staticmethod
     def _select_backend(kernel):
@@ -141,7 +152,7 @@ class FullImageRenderer(QObject):
             self._worker.stop()
             self._worker.wait()
 
-        # If viewport unchanged and we have a buffer, just re-color
+        # If the viewport is unchanged, and we have a buffer, just re-color
         if self._viewport == (min_x, max_x, min_y, max_y) and self._iter_buf is not None:
             self.render_image()
             return
@@ -167,16 +178,18 @@ class FullImageRenderer(QObject):
             self._worker.start()
 
     # -- Callbacks
-    def _set_iter_buf(self, data: np.ndarray):
+    def _set_iter_buf(self, data: np.ndarray, render_w: int, render_h: int):
         self._iter_buf = data
+        self._last_frame_size = (render_w, render_h)
         self.log_text.emit(f"Render time: {round(time.time() - self._start_time, 3)}s")
         self.render_image()
 
     def render_image(self):
         rgb_img = self._apply_palette()
         qimage = ndarray_to_qimage(rgb_img)
+        rw, rh = self._last_frame_size
         # Deep copy before emitting across threads (prevents dangling buffers)
-        self.image_updated.emit(qimage.copy())
+        self.image_updated.emit(qimage.copy(), int(rw), int(rh))
 
     def _apply_palette(self):
         return self.coloring.apply(self._iter_buf.astype(np.float64), self.coloring_mode,
@@ -184,7 +197,7 @@ class FullImageRenderer(QObject):
                                    interior_color=self.inter_color)
 
     # Progressive tile handlers
-    def _on_tile_done(self, x0, y0, w, h, tile_iter, seq):
+    def _on_tile_done(self, x0, y0, w, h, tile_iter, seq, frame_w, frame_h):
         if seq != self._render_seq:
             return
         self._iter_canvas[y0:y0 + h, x0:x0 + w] = tile_iter.astype(self.precision)
@@ -194,7 +207,7 @@ class FullImageRenderer(QObject):
                                         self.exter_palette, self.inter_palette,
                                         interior_color=self.inter_color)
         tile_qimg = ndarray_to_qimage(tile_rgb).copy()
-        self.tile_ready.emit(self._render_seq, x0, y0, tile_qimg)
+        self.tile_ready.emit(self._render_seq, x0, y0, tile_qimg, frame_w, frame_h)
 
     def _on_frame_finished(self, full_iter, seq):
         if seq != self._render_seq:

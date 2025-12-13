@@ -17,6 +17,8 @@ class RenderSettings:
     max_iter: int
     samples: int = 1
     precision: np.dtype = np.float64
+    base_res: str = None
+    target_res: str = None
 
 class Fractal(ABC):
     name: str

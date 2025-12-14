@@ -83,6 +83,7 @@ class FractalViewer(QMainWindow):
         self.stats_label = QLabel("Tiles: 0 \nTiles/sec: 0.0")
         self.stats_label.setStyleSheet("color: #AAB; padding: 2px;")
         self.compositor = TileCompositor(self.display, self.stats_label, parent=self)
+        self.compositor.tile_queue_empty.connect(self._final_render)
 
         # UI sets
         self._build_ui()
@@ -369,13 +370,14 @@ class FractalViewer(QMainWindow):
                 return
 
         # Resolution preset
-        old_w, old_h = self._current_render_size()
+        prev_w, prev_h = self.rsize.compute_target_size(self.aspect_ratio)
         self.rsize.target_quality = self.res_input.currentText()
         new_w, new_h = self.rsize.compute_target_size(self.aspect_ratio)
 
-        if (new_w, new_h) != (old_w, old_h):
-            self._adjust_zoom_for_resolution_change(old_w, old_h, new_w, new_h)
+        if (new_w, new_h) != (prev_w, prev_h):
+            self._adjust_zoom_for_resolution_change(prev_w, prev_h, new_w, new_h)
             self.log(f"Resolution preset changed to {self.rsize.target_quality}.")
+            self.state.set_frame_size(new_w, new_h)
 
         # Max iter & samples
         try:
@@ -467,6 +469,7 @@ class FractalViewer(QMainWindow):
     def render_fractal(self):
         # Compute target render size based on preset & aspect
         render_w, render_h = self.rsize.compute_target_size(self.aspect_ratio)
+        self.state.set_frame_size(render_w, render_h)
 
         # Lazily construct renderer
         if self.renderer is None:
@@ -492,10 +495,10 @@ class FractalViewer(QMainWindow):
         min_y = self.state.center_y - (render_h / 2) * scale
         max_y = self.state.center_y + (render_h / 2) * scale
 
+        print("Min_x=", min_x, "Max_x=", max_x, "Min_y=", min_y, "Max_y=", max_y, "Zoom=", self.state.zoom)
+
         # Precision selection
-        if self.state.zoom > 1e14:
-            precision_mode = Precisions.Arbitrary
-        elif self.state.zoom > 1e6:
+        if self.state.zoom > 1e6:
             precision_mode = Precisions.Double
         else:
             precision_mode = Precisions.Single
@@ -522,9 +525,7 @@ class FractalViewer(QMainWindow):
         max_y = cy + (render_h / 2) * scale
 
         # Precision
-        if zoom > 1e14:
-            precision_mode = Precisions.Arbitrary
-        elif zoom > 1e6:
+        if zoom > 1e6:
             precision_mode = Precisions.Double
         else:
             precision_mode = Precisions.Single
@@ -563,17 +564,30 @@ class FractalViewer(QMainWindow):
         # Cache & present (fade)
         self.cached_image = image
         if not (self.animation_timer and self.animation_timer.isActive()):
-            self._fade_in_image(self.cached_image)
-            self.view_image = self.cached_image
-            self.cached_image = None
-            # Keep compositor's committed copy in sync
-            self.compositor.view_image = self.view_image
+            if not self.tile_render_check.isChecked():
+                self._fade_in_image(self.cached_image)
+                self.view_image = self.cached_image
+                self.cached_image = None
+                # Keep compositor's committed copy in sync
+                self.compositor.view_image = self.view_image
+            else:
+                self.final_render_pending = True
         else:
             self.final_render_pending = True
 
     def _on_tile_ready(self, gen: int, x: int, y: int, tile_qimg: QImage, frame_w: int, frame_h: int):
         # Route to compositor
         self.compositor.on_tile_ready(gen, x, y, tile_qimg, frame_w, frame_h)
+
+    def _final_render(self):
+        if self.final_render_pending:
+            self.final_render_pending = False
+            self.view_image = self.compositor.view_image
+            self._fade_in_image(self.cached_image)
+            self.view_image = self.cached_image
+            self.cached_image = None
+            self.compositor.view_image = self.view_image
+
 
     # ---------- Input & animation ----------
     def wheelEvent(self, event: QWheelEvent):
@@ -584,7 +598,6 @@ class FractalViewer(QMainWindow):
             return
 
         lw, lh = self.display.width(), self.display.height()
-        pxu_x, pxu_y = self.state.pixels_per_unit_xy(lw, lh)
 
         zoom_in = event.angleDelta().y() > 0
         factor = self.state.zoom_factor if zoom_in else (1 / self.state.zoom_factor)
@@ -700,6 +713,7 @@ class FractalViewer(QMainWindow):
             elif self.phase == 1:
                 self._zoom_step(eased_t, base_pixmap)
 
+        # Change animation phase
         if self.current_step == half:
             if self.phase == 0:
                 self.state.center_x, self.state.center_y = self.target_x, self.target_y
@@ -711,6 +725,7 @@ class FractalViewer(QMainWindow):
                 self.phase = 0
             self.anim_base = self.display.pixmap().toImage().copy()
 
+        # Animation done
         if self.current_step >= self.animation_steps:
             self.animation_timer.stop()
             self.state.center_x, self.state.center_y, self.state.zoom = self.target_x, self.target_y, self.target_zoom

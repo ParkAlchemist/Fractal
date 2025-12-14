@@ -1,9 +1,10 @@
+import math
 import time as _t
 from dataclasses import dataclass
 from collections import deque
 from typing import Deque, Dict, Tuple, List, Optional
 
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QImage, QPainter, QPixmap, QResizeEvent
 from PySide6.QtWidgets import QWidget, QLabel, QSizePolicy
 
@@ -139,13 +140,19 @@ class TileCompositor(QWidget):
     Owns the progressive tile queue and compositing.
     Scales each tile from its frame grid (frame_w x frame_h) to the current label size.
     """
+    tile_queue_empty = Signal()
     def __init__(self, display_label: QLabel, stats_label: QLabel, parent=None):
         super().__init__(parent)
         self.display = display_label
         self.stats_label = stats_label
 
-        self.tile_queue: Deque[Tuple[int, int, int, QImage, int, int]] = deque()  # (gen,x,y,qimg,frame_w,frame_h)
-        self.tile_index: Dict[Tuple[int, int, int, int, int, int, int], int] = {}
+        self.tile_order: Deque[Tuple[int, int, int, int, int, int, int]] = deque()  # (gen,x,y,qimg,frame_w,frame_h)
+
+        self.tile_table: Dict[Tuple[int, int, int, int, int, int, int],
+                              Tuple[int, int, int, QImage, int, int]] = {}
+        self.tile_in_order: Dict[
+            Tuple[int, int, int, int, int, int, int], bool] = {}
+
         self.tile_overlay_rects: Deque[Tuple[int, int, int, int, int, int]] = deque(maxlen=5000)
         self.show_overlay: bool = True
 
@@ -161,41 +168,71 @@ class TileCompositor(QWidget):
         self.flush_timer.setInterval(16)  # ~60 FPS
         self.flush_timer.timeout.connect(self.flush)
 
+        self.expected_gen: Optional[int] = None
+        self.accepted_frame_w: Optional[int] = None
+        self.accepted_frame_h: Optional[int] = None
+
+        self.last_disp_w: Optional[int] = None
+        self.last_disp_h: Optional[int] = None
+
     def set_paused(self, paused: bool) -> None:
         self.paused = bool(paused)
         if self.paused and self.flush_timer.isActive():
             self.flush_timer.stop()
 
     def clear(self):
-        self.tile_queue.clear()
-        self.tile_index.clear()
+        self.tile_order.clear()
+        self.tile_table.clear()
+        self.tile_in_order.clear()
         if self.flush_timer.isActive():
             self.flush_timer.stop()
         self.cached_image = None
         self.tiles_start_time = None
         self.tiles_processed = 0
         self.tile_overlay_rects.clear()
+        self.expected_gen = None
+        self.accepted_frame_w = None
+        self.accepted_frame_h = None
+        self.last_disp_w = None
+        self.last_disp_h = None
 
     def set_overlay_enabled(self, enabled: bool):
         self.show_overlay = bool(enabled)
 
     # ---- Incoming tiles ----
     def on_tile_ready(self, gen: int, x: int, y: int, tile_qimg: QImage, frame_w: int, frame_h: int):
-        key = (gen, x, y, tile_qimg.width(), tile_qimg.height(), frame_w, frame_h)
-        entry = (gen, x, y, tile_qimg, frame_w, frame_h)
-        if key in self.tile_index:
-            idx = self.tile_index[key]
-            self.tile_queue[idx] = entry
+        if self.expected_gen is None:
+            self.expected_gen = int(gen)
+        elif int(gen) != self.expected_gen:
+            return  # drop tiles from other frames
+
+        if self.accepted_frame_w is None or self.accepted_frame_h is None:
+            self.accepted_frame_w = int(frame_w)
+            self.accepted_frame_h = int(frame_h)
         else:
-            self.tile_queue.append(entry)
-            self.tile_index[key] = len(self.tile_queue) - 1
+            if int(frame_w) != self.accepted_frame_w or int(
+                    frame_h) != self.accepted_frame_h:
+                return  # drop mismatched scale
+
+        key = (int(gen), int(x), int(y),
+               tile_qimg.width(), tile_qimg.height(),
+               int(frame_w), int(frame_h))
+        entry = (int(gen), int(x), int(y), tile_qimg, int(frame_w),
+                 int(frame_h))
+
+        self.tile_table[key] = entry
+        if key not in self.tile_in_order:
+            self.tile_order.append(key)
+            self.tile_in_order[key] = True
 
         if self.tiles_start_time is None:
             self.tiles_start_time = _t.time()
         self.tiles_processed += 1
 
         if self.show_overlay:
-            self.tile_overlay_rects.append((x, y, tile_qimg.width(), tile_qimg.height(), frame_w, frame_h))
+            self.tile_overlay_rects.append(
+                (x, y, tile_qimg.width(), tile_qimg.height(), frame_w,
+                 frame_h))
 
         if not self.paused and not self.flush_timer.isActive():
             self.flush_timer.start()
@@ -217,33 +254,46 @@ class TileCompositor(QWidget):
                 self.stats_label.setText(f"Tiles: {self.tiles_processed}\nTiles/sec: {tps:.1f}")
 
         # Prepare backing image
-        if self.cached_image is None:
+        if self.cached_image is None or self.last_disp_w != disp_w or self.last_disp_h != disp_h:
             if self.view_image is not None:
-                self.cached_image = self.view_image.copy()
+                base = self.view_image.copy()
+                if base.width() != disp_w or base.height() != disp_h:
+                    base = base.scaled(disp_w, disp_h,
+                                       Qt.AspectRatioMode.IgnoreAspectRatio,
+                                       Qt.TransformationMode.SmoothTransformation)
+                self.cached_image = base.copy()
             else:
                 self.cached_image = QImage(disp_w, disp_h, QImage.Format_RGB32)
                 self.cached_image.fill(Qt.GlobalColor.black)
+            self.last_disp_w, self.last_disp_h = disp_w, disp_h
 
-        budget = min(16, len(self.tile_queue))
+        budget = min(16, len(self.tile_order))
         painter = QPainter(self.cached_image)
         for _ in range(budget):
-            gen, x, y, tile_qimg, frame_w, frame_h = self.tile_queue.popleft()
-            key = (gen, x, y, tile_qimg.width(), tile_qimg.height(), frame_w, frame_h)
-            self.tile_index.pop(key, None)
+            key = self.tile_order.popleft()
+            entry = self.tile_table.pop(key, None)
+            self.tile_in_order.pop(key, None)
+            if entry is None:
+                continue
+
+            gen, x, y, tile_qimg, frame_w, frame_h = entry
 
             sx = disp_w / max(1.0, float(frame_w))
             sy = disp_h / max(1.0, float(frame_h))
 
-            dst_x = int(round(x * sx))
-            dst_y = int(round(y * sy))
-            dst_w = int(round(tile_qimg.width() * sx))
-            dst_h = int(round(tile_qimg.height() * sy))
+            x1 = int(math.floor(x * sx))
+            y1 = int(math.floor(y * sy))
+            x2 = int(math.ceil((x + tile_qimg.width()) * sx))
+            y2 = int(math.ceil((y + tile_qimg.height()) * sy))
+
+            dst_w = max(0, x2 - x1)
+            dst_h = max(0, y2 - y1)
 
             if dst_w > 0 and dst_h > 0:
                 scaled_tile = tile_qimg.scaled(dst_w, dst_h,
                                                Qt.AspectRatioMode.IgnoreAspectRatio,
                                                Qt.TransformationMode.SmoothTransformation)
-                painter.drawImage(dst_x, dst_y, scaled_tile)
+                painter.drawImage(x1, y1, scaled_tile)
         painter.end()
 
         # Overlay (optional)
@@ -252,18 +302,26 @@ class TileCompositor(QWidget):
             painter.setPen(Qt.GlobalColor.red)
             overlay_budget = min(64, len(self.tile_overlay_rects))
             for _ in range(overlay_budget):
-                x, y, w, h, fw, fh = self.tile_overlay_rects.popleft()
-                sx = disp_w / max(1.0, float(fw))
-                sy = disp_h / max(1.0, float(fh))
-                painter.drawRect(int(round(x * sx)),
-                                 int(round(y * sy)),
-                                 int(round(w * sx)),
-                                 int(round(h * sy)))
+                x, y, w, h, fw_tile, fh_tile = self.tile_overlay_rects.popleft()
+                sx = disp_w / max(1.0, float(fw_tile))
+                sy = disp_h / max(1.0, float(fh_tile))
+
+                x1 = int(math.floor(x * sx))
+                y1 = int(math.floor(y * sy))
+                x2 = int(math.ceil((x + w) * sx))
+                y2 = int(math.ceil((y + h) * sy))
+
+                painter.drawRect(x1, y1, max(0, x2 - x1), max(0, y2 - y1))
             painter.end()
 
         # Present
         self.display.setPixmap(QPixmap.fromImage(self.cached_image))
 
-        if not self.tile_queue:
+        if not self.tile_order:
             self.flush_timer.stop()
             self.view_image = self.cached_image.copy()
+            self.cached_image = None
+            self.expected_gen = None
+            self.accepted_frame_w = None
+            self.accepted_frame_h = None
+            self.tile_queue_empty.emit()

@@ -163,8 +163,9 @@ class FullImageRenderer(QObject):
         vp = Viewport(min_x=min_x, max_x=max_x, min_y=min_y, max_y=max_y,
                       width=self.width, height=self.height)
 
+        self._last_frame_size = (self.width, self.height)
+
         if self.engine_mode == EngineMode.FULL_FRAME:
-            self.renderer.set_engine(FullFrameEngine())
             self._worker = FullImageRenderWorker(self.renderer, vp)
             self._worker.iter_calc_done.connect(self._set_iter_buf)
             self._worker.start()
@@ -200,6 +201,9 @@ class FullImageRenderer(QObject):
     def _on_tile_done(self, x0, y0, w, h, tile_iter, seq, frame_w, frame_h):
         if seq != self._render_seq:
             return
+
+        self._last_frame_size = (int(frame_w), int(frame_h))
+
         self._iter_canvas[y0:y0 + h, x0:x0 + w] = tile_iter.astype(self.precision)
 
         # Colorize just the tile and emit it; deep copy for thread safety
@@ -213,6 +217,10 @@ class FullImageRenderer(QObject):
         if seq != self._render_seq:
             return
         self._iter_buf = full_iter.astype(self.precision)
+
+        h, w = full_iter.shape[:2]
+        self._last_frame_size = (int(w), int(h))
+
         self.log_text.emit(f"Render time: {round(time.time() - self._start_time, 3)}s")
         self.render_image()
 
@@ -299,4 +307,3 @@ class FullImageRenderer(QObject):
                 self.renderer.set_engine(TileEngine(tile_w=self.tile_w, tile_h=self.tile_h))
 
         self.renderer = Renderer(self.fractal, self.backend, self.settings, engine=self.renderer.engine)
-        self.stop()

@@ -1,9 +1,9 @@
 import os
 import time
 import threading
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed, Future
 from abc import ABC, abstractmethod
-from typing import Optional, Callable
+from typing import Optional, Callable, Tuple, Generator, Set, Any
 import numpy as np
 
 from fractals.fractal_base import Fractal, Viewport, RenderSettings
@@ -45,7 +45,7 @@ class TileEngine(BaseRenderEngine):
         self.tile_h = int(tile_h)
         self.center_out = True
 
-    def _tile_viewports(self, vp: Viewport):
+    def _tile_viewports(self, vp: Viewport) -> Generator[Tuple[int, int, Viewport]]:
         W, H = vp.width, vp.height
         cx, cy = W / 2.0, H / 2.0
         tiles = []
@@ -101,7 +101,7 @@ class AdaptiveTileEngine(BaseRenderEngine):
                  on_tile: Optional[Callable[[int, int, np.ndarray], None]] = None,
                  parallel: bool = True,
                  max_workers: int = 0,
-                 parallel_for_cpu_only: bool = True):
+                 parallel_for_gpu_only: bool = True):
         super().__init__(on_tile)
         self.min_tile = int(min_tile)
         self.max_tile = int(max_tile)
@@ -112,7 +112,7 @@ class AdaptiveTileEngine(BaseRenderEngine):
         # Concurrency controls
         self.parallel = bool(parallel)
         self.max_workers = int(max_workers)
-        self.parallel_for_cpu_only = bool(parallel_for_cpu_only)
+        self.parallel_for_gpu_only = bool(parallel_for_gpu_only)
 
         # Motion state
         self._last_viewport: Optional[Viewport] = None
@@ -164,7 +164,7 @@ class AdaptiveTileEngine(BaseRenderEngine):
 
         # Decide concurrency
         backend_name = getattr(backend, "name", "").upper()
-        allow_parallel = self.parallel and (not self.parallel_for_cpu_only or backend_name == "CPU")
+        allow_parallel = self.parallel and (not self.parallel_for_gpu_only or backend_name == "CPU")
         workers = (self.max_workers if self.max_workers > 0 else max(1, (os.cpu_count() or 4))) if allow_parallel else 1
 
         # Thread pool
@@ -173,10 +173,13 @@ class AdaptiveTileEngine(BaseRenderEngine):
 
         # Local settings
         def make_settings(base: RenderSettings, max_iter: int) -> RenderSettings:
-            s = RenderSettings(max_iter=max_iter, samples=base.samples, precision=base.precision)
+            s = RenderSettings(max_iter=max_iter,
+                               samples=base.samples,
+                               precision=base.precision)
             return s
 
-        def compute_tile(ti: TileInfo, phase: str = None):
+        def compute_tile(ti: TileInfo, phase: str = None) -> Tuple[TileInfo, None, None] | \
+                                                             Tuple[TileInfo, Any, bool | Any]:
             ti.w = min(ti.w, W - ti.x0)
             ti.h = min(ti.h, H - ti.y0)
             if ti.w <= 0 or ti.h <= 0: return ti, None, None
@@ -193,7 +196,15 @@ class AdaptiveTileEngine(BaseRenderEngine):
 
             # Render
             t0 = time.perf_counter()
-            tile_iters = backend.render(fractal, sub_vp, st)
+            if hasattr(backend, "render_async") and self.parallel:
+                tile_iters, done_evt = backend.render_async(fractal, sub_vp, st)
+
+                try:
+                    done_evt.synchronize()  # CUDA
+                except AttributeError:
+                    done_evt.wait()     # OpenCL
+            else:
+                tile_iters = backend.render(fractal, sub_vp, st)
             t_ms = (time.perf_counter() - t0) * 1000.0
 
             with canvas_lock:
@@ -213,6 +224,7 @@ class AdaptiveTileEngine(BaseRenderEngine):
 
                 if cancel_cb is not None and cancel_cb():
                     # The current operation has become obsolete -> return
+                    self.scheduler.clear()
                     break
 
                 popped = self.scheduler.pop_next()
@@ -264,7 +276,7 @@ class AdaptiveTileEngine(BaseRenderEngine):
 
     # ------- Helpers -------------------------------------
     @staticmethod
-    def _wait_some(inflight, timeout: float):
+    def _wait_some(inflight, timeout: float) -> Tuple[Set[Future], Set[Future]]:
         """
         Wait for at least one future to complete
         """
@@ -279,7 +291,8 @@ class AdaptiveTileEngine(BaseRenderEngine):
             pass
         return done, inflight
 
-    def _seed_root_tiles(self, W, H, max_tile):
+    def _seed_root_tiles(self, W: int, H: int,
+                         max_tile: int) -> list[tuple[int, int, int, int, int]]:
         """
         Cover the viewport with large blocks aligned to multiples of 32
         """
@@ -297,7 +310,8 @@ class AdaptiveTileEngine(BaseRenderEngine):
         # Round down to the nearest multiple of 32
         return max((n // 32) * 32, 32)
 
-    def _should_split(self, tile_iters, t_ms, w, h):
+    def _should_split(self, tile_iters: np.ndarray,
+                      t_ms: float, w: int, h: int) -> bool:
         """
         Check wether given tile should be split or not
         :return: True or False
@@ -310,7 +324,9 @@ class AdaptiveTileEngine(BaseRenderEngine):
 
         return time_heavy or var > 0.5
 
-    def _split(self, tile, W, H):
+    def _split(self,
+               tile: tuple[int, int, int, int, int],
+               W: int, H: int) -> list[tuple[int, int, int, int, int]]:
         """
         Splits given tile into 4 tiles
         :return: split tiles
@@ -335,7 +351,8 @@ class AdaptiveTileEngine(BaseRenderEngine):
         return clamped
 
     @staticmethod
-    def _make_sub_viewport(vp: Viewport, x0: int, y0: int, w: int, h: int) -> Viewport:
+    def _make_sub_viewport(vp: Viewport, x0: int, y0: int,
+                           w: int, h: int) -> Viewport:
         """
         Creates a subviewport on given coordinates from given viewport
         :return: subviewport

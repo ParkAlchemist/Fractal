@@ -40,7 +40,7 @@ class TileScheduler:
         self._H = 0
         self._now = time.perf_counter()
 
-    def clear(self):
+    def clear(self) -> None:
         """
         Clears all priority queues.
         :return: None

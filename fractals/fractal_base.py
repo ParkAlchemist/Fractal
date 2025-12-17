@@ -24,13 +24,13 @@ class Fractal(ABC):
     name: str
 
     @abstractmethod
-    def get_kernel_args(self, viewport: Viewport,
-                        settings: RenderSettings) -> Optional[Dict[str, Any]]:
+    def get_backend_params(self, viewport: Viewport,
+                           settings: RenderSettings) -> Optional[Dict[str, Any]]:
         ...
 
     @abstractmethod
-    def get_kernel_source(self, settings: RenderSettings,
-                          backend_name: str) -> Optional[Dict[str, Any]]:
+    def get_backend_spec(self, settings: RenderSettings,
+                         backend_name: str) -> Optional[Dict[str, Any]]:
         ...
 
     @abstractmethod

@@ -15,7 +15,7 @@ from kernel_sources.opencl.mandelbrot import (mandelbrot_kernel_cl_f32,
 class MandelbrotFractal(Fractal):
     name: str = "mandelbrot"
 
-    def get_kernel_args(self, vp: Viewport, st: RenderSettings) -> Dict[str, Any]:
+    def get_backend_params(self, vp: Viewport, st: RenderSettings) -> Dict[str, Any]:
         min_x = vp.min_x
         max_x = vp.max_x
         min_y = vp.min_y
@@ -35,8 +35,8 @@ class MandelbrotFractal(Fractal):
             "samples": samples,
         }
 
-    def get_kernel_source(self, settings: RenderSettings,
-                          backend_name: str) -> Optional[Dict[str, Any]]:
+    def get_backend_spec(self, settings: RenderSettings,
+                         backend_name: str) -> Optional[Dict[str, Any]]:
         src = None
         name = "mandelbrot_kernel"
         cast = settings.precision

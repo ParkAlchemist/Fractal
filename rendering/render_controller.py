@@ -5,9 +5,10 @@ import time
 from PySide6.QtCore import Signal, QObject, QThread
 from PySide6.QtGui import QImage
 
-from utils.enums import Kernel, ColoringMode, EngineMode, Precisions
+from utils.enums import BackendType, ColoringMode, EngineMode, PrecisionMode
 from coloring.palettes import palettes
-from utils.utils import available_backends, ndarray_to_qimage
+from utils.image_helpers import ndarray_to_qimage
+from utils.backend_helpers import available_backends
 from backends.opencl_backend import OpenClBackend
 from backends.cpu_backend import CpuBackend
 from backends.cuda_backend import CudaBackend
@@ -88,14 +89,14 @@ class ProgressiveTileRenderWorker(QThread):
 
 # --- Renderer facade -------------------------------------------------------
 
-class FullImageRenderer(QObject):
+class RenderController(QObject):
     # (full_frame, render_w, render_h)
     image_updated = Signal(QImage, int, int)
     # (gen_id, x, y, tile QImage, frame_w, frame_h)
     tile_ready = Signal(int, int, int, QImage, int, int)
     log_text = Signal(str)
 
-    def __init__(self, width, height, palette, kernel=Kernel.AUTO,
+    def __init__(self, width, height, palette, kernel=BackendType.AUTO,
                  max_iter=200, samples=2, coloring_mode=ColoringMode.EXTERIOR,
                  precision=np.float32):
         super().__init__()
@@ -138,12 +139,12 @@ class FullImageRenderer(QObject):
     # -- Backend selection
     @staticmethod
     def _select_backend(kernel):
-        if kernel == Kernel.OPENCL: return OpenClBackend()
-        if kernel == Kernel.CUDA:   return CudaBackend()
-        if kernel == Kernel.CPU:    return CpuBackend()
+        if kernel == BackendType.OPENCL: return OpenClBackend()
+        if kernel == BackendType.CUDA:   return CudaBackend()
+        if kernel == BackendType.CPU:    return CpuBackend()
         backs = available_backends()
-        if Kernel.OPENCL.name in backs: return OpenClBackend()
-        if Kernel.CUDA.name   in backs: return CudaBackend()
+        if BackendType.OPENCL.name in backs: return OpenClBackend()
+        if BackendType.CUDA.name   in backs: return CudaBackend()
         return CpuBackend()
 
     # -- Render entry point
@@ -154,7 +155,7 @@ class FullImageRenderer(QObject):
 
         # If the viewport is unchanged, and we have a buffer, just re-color
         if self._viewport == (min_x, max_x, min_y, max_y) and self._iter_buf is not None:
-            self.render_image()
+            self.color_image()
             return
 
         self._start_time = time.time()
@@ -183,9 +184,9 @@ class FullImageRenderer(QObject):
         self._iter_buf = data
         self._last_frame_size = (render_w, render_h)
         self.log_text.emit(f"Render time: {round(time.time() - self._start_time, 3)}s")
-        self.render_image()
+        self.color_image()
 
-    def render_image(self):
+    def color_image(self):
         rgb_img = self._apply_palette()
         qimage = ndarray_to_qimage(rgb_img)
         rw, rh = self._last_frame_size
@@ -222,7 +223,7 @@ class FullImageRenderer(QObject):
         self._last_frame_size = (int(w), int(h))
 
         self.log_text.emit(f"Render time: {round(time.time() - self._start_time, 3)}s")
-        self.render_image()
+        self.color_image()
 
     # Stop/cancel
     def stop(self):
@@ -270,7 +271,7 @@ class FullImageRenderer(QObject):
         self.stop()
 
     def set_precision(self, new_precision_mode):
-        if new_precision_mode == Precisions.Single:
+        if new_precision_mode == PrecisionMode.Single:
             new_precision = np.float32
         else:
             new_precision = np.float64

@@ -1,6 +1,6 @@
 from enum import Enum, auto
 
-class Kernel(Enum):
+class BackendType(Enum):
     AUTO = auto()
     OPENCL = auto()
     CUDA = auto()
@@ -21,7 +21,7 @@ class Tools(Enum):
     Wheel_zoom = auto()
     Set_center = auto()
 
-class Precisions(Enum):
+class PrecisionMode(Enum):
     Single = auto()
     Double = auto()
     Arbitrary = auto()

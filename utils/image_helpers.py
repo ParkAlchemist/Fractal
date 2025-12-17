@@ -1,58 +1,6 @@
-import os
 import numpy as np
 from PySide6.QtGui import QImage
-from mpmath import mp
-from numba import cuda
-import pyopencl as cl
 
-from utils.enums import Kernel
-
-def fractal_to_image_coords(fx, fy, center_x, center_y, zoom, image_width, image_height):
-    px = int((fx - center_x) * zoom + image_width / 2)
-    py = int((fy - center_y) * zoom + image_height / 2)
-    return px, py
-
-def image_to_fractal_coords(px, py, center_x, center_y, zoom, image_width, image_height):
-    fx = (px - image_width / 2) / zoom + center_x
-    fy = (py - image_height / 2) / zoom + center_y
-    return fx, fy
-
-def clear_cache_lock():
-    cache_dir = os.path.join(
-        os.environ.get("LOCALAPPDATA", os.path.expanduser("~\\AppData\\Local")),
-        "pyopencl", "pyopencl", "Cache", "pyopencl-compiler-cache-v2-py3.13.9.final.0"
-    )
-    lock_file = os.path.join(cache_dir, "lock")
-    if os.path.exists(lock_file):
-        try: os.remove(lock_file)
-        except PermissionError: pass
-
-def available_backends():
-    backs = []
-    try:
-        if cl.get_platforms():
-            backs.append(Kernel.OPENCL.name)
-    except Exception as e:
-        print("Error in getting OpenCL platforms: ", e)
-        pass
-    if cuda.is_available():
-        backs.append(Kernel.CUDA.name)
-    backs.append(Kernel.CPU.name)
-    return backs
-
-def make_reference_orbit_hp(c_ref: complex, max_iter: int, mp_dps: int = 160):
-    """
-    High-precision reference orbit z*_n; returned as float64 array shape (N,2).
-    """
-    mp.dps = mp_dps
-    c = mp.mpc(c_ref.real, c_ref.imag)
-    z = mp.mpc(0, 0)
-    out = np.empty((max_iter, 2), dtype=np.float64)
-    for n in range(max_iter):
-        out[n, 0] = float(z.real)
-        out[n, 1] = float(z.imag)
-        z = z*z + c
-    return out
 
 def qimage_to_ndarray(img: QImage, require_copy: bool = True) -> np.ndarray:
     """
@@ -87,8 +35,8 @@ def qimage_to_ndarray(img: QImage, require_copy: bool = True) -> np.ndarray:
             a = arr[..., 3:4].astype(np.float32)
             nz = a != 0
             arr[..., :3] = np.where(nz, (
-                        arr[..., :3].astype(np.float32) * 255.0 / a).clip(0,
-                                                                          255),
+                    arr[..., :3].astype(np.float32) * 255.0 / a).clip(0,
+                                                                      255),
                                     0).astype(np.uint8)
 
     elif fmt in (QImage.Format_RGBA8888, QImage.Format_RGBA8888_Premultiplied):
@@ -98,8 +46,8 @@ def qimage_to_ndarray(img: QImage, require_copy: bool = True) -> np.ndarray:
             a = arr[..., 3:4].astype(np.float32)
             nz = a != 0
             arr[..., :3] = np.where(nz, (
-                        arr[..., :3].astype(np.float32) * 255.0 / a).clip(0,
-                                                                          255),
+                    arr[..., :3].astype(np.float32) * 255.0 / a).clip(0,
+                                                                      255),
                                     0).astype(np.uint8)
 
     elif fmt == QImage.Format_RGB888:
@@ -121,6 +69,7 @@ def qimage_to_ndarray(img: QImage, require_copy: bool = True) -> np.ndarray:
     # Return a copy by default (safe)—prevents issues if the underlying QImage goes out of scope
     return arr.copy() if require_copy else arr
 
+
 def ndarray_to_qimage(arr: np.ndarray) -> QImage:
     """
     Convert a ndarray of shape (h,w), (h,w,1), (h,w,3) [RGB], or (h,w,4) [RGBA]
@@ -134,12 +83,14 @@ def ndarray_to_qimage(arr: np.ndarray) -> QImage:
     if arr.ndim == 3 and arr.shape[2] in (1, 3, 4):
         h, w, c = arr.shape
         if c == 1:
-            qimg = QImage(arr.data.tobytes(), w, h, w, QImage.Format_Grayscale8)
+            qimg = QImage(arr.data.tobytes(), w, h, w,
+                          QImage.Format_Grayscale8)
             return qimg.copy()
         elif c == 3:
             # Qt expects RGB888
             bytes_per_line = 3 * w
-            qimg = QImage(arr.data.tobytes(), w, h, bytes_per_line, QImage.Format_RGB888)
+            qimg = QImage(arr.data.tobytes(), w, h, bytes_per_line,
+                          QImage.Format_RGB888)
             return qimg.copy()
         elif c == 4:
             # Qt RGBA8888 is a safe, explicit format
@@ -165,10 +116,11 @@ def qimage_to_np_gray(img: QImage) -> np.ndarray:
     gray = (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255.0
     return gray
 
+
 def gradient_mag(gray: np.ndarray) -> np.ndarray:
     """Cheap gradient magnitude using 1st differences."""
     gx = np.zeros_like(gray)
     gy = np.zeros_like(gray)
     gx[:, 1:-1] = (gray[:, 2:] - gray[:, :-2]) * 0.5
     gy[1:-1, :] = (gray[2:, :] - gray[:-2, :]) * 0.5
-    return np.sqrt(gx*gx + gy*gy)
+    return np.sqrt(gx * gx + gy * gy)

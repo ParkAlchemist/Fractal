@@ -1,16 +1,15 @@
 import numpy as np
 import pyopencl as cl
-import threading
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, Tuple
 
-from utils.utils import clear_cache_lock
+from utils.backend_helpers import clear_cache_lock
 from fractals.fractal_base import Fractal, Viewport, RenderSettings
 from backends.backend_base import Backend
 
 class OpenClBackend(Backend):
     name = "OPENCL"
 
-    def __init__(self, prefer_cpu=False):
+    def __init__(self, prefer_cpu=False, queues: int = 0, out_of_order: bool = False):
 
         clear_cache_lock()
 
@@ -31,55 +30,88 @@ class OpenClBackend(Backend):
         if self.device is None:
             raise RuntimeError("No OpenCL devices found.")
 
-        self._tls = threading.local()
-        self._kernel = None
+        # Context
+        self.ctx = cl.Context([self.device])
 
-    def _get_ctx_queue(self):
-        if not hasattr(self._tls, "ctx"):
-            self._tls.ctx = cl.Context([self.device])
-            self._tls.queue = cl.CommandQueue(self._tls.ctx, self.device)
-        return self._tls.ctx, self._tls.queue
+        # Queue properties
+        props: cl.command_queue_properties = 0
+        if out_of_order:
+            props |= cl.command_queue_properties.OUT_OF_ORDER_EXEC_MODE_ENABLE
+
+        self.queues = [cl.CommandQueue(self.ctx, self.device, properties=props) for _ in range(queues)] if queues > 0 else []
+
+        self._kernel = None
+        self._precision_cast = np.float32
+
+    def _get_queue(self) -> cl.CommandQueue:
+        if not self.queues:
+            return cl.CommandQueue(self.ctx, self.device)
+
+        q = self.queues.pop(0)
+        self.queues.append(q)
+        return q
 
     def compile(self, fractal: Fractal, settings: RenderSettings) -> None:
 
-        params = fractal.get_kernel_source(settings, self.name)
-        self._cast = params["precision"]
+        spec = fractal.get_backend_spec(settings, self.name)
+        self._precision_cast = spec["precision"]
+        program = cl.Program(self.ctx, spec["kernel_source"]).build()
+        self._kernel = cl.Kernel(program, spec["kernel_name"])
 
-        ctx, _ = self._get_ctx_queue()
-        program = cl.Program(ctx, params["kernel_source"]).build()
-        self._kernel = cl.Kernel(program, params["kernel_name"])
+    def render_async(self,
+                     fractal: Fractal,
+                     vp: Viewport,
+                     settings: RenderSettings,
+                     reference: Optional[Dict[str, Any]] = None,
+                     queue: Optional[cl.CommandQueue] = None) -> Tuple[np.ndarray, cl.Event]:
+        """
+        Asynchronous rendering.
+        - Enqueue kernel on a chosen queue
+        - Enqueue non-blocking read into a host array
+        - Return (host_array, completion_event)
+        """
+        q = queue or self._get_queue()
+        params = fractal.get_backend_params(vp, settings)
+
+        # Output buffer (device)
+        out_np = np.empty(params["width"] * params["height"],
+                          dtype=settings.precision)
+
+        # Device buffer
+        out_buf = cl.Buffer(self.ctx, cl.mem_flags.WRITE_ONLY, out_np.nbytes)
+
+        # Set arguments
+        self._kernel.set_arg(0, self._precision_cast(params["min_x"]))
+        self._kernel.set_arg(1, self._precision_cast(params["max_x"]))
+        self._kernel.set_arg(2, self._precision_cast(params["min_y"]))
+        self._kernel.set_arg(3, self._precision_cast(params["max_y"]))
+        self._kernel.set_arg(4, out_buf)
+        self._kernel.set_arg(5, np.int32(params["width"]))
+        self._kernel.set_arg(6, np.int32(params["height"]))
+        self._kernel.set_arg(7, np.int32(params["max_iter"]))
+        self._kernel.set_arg(8, np.int32(params["samples"]))
+
+        # Local/Global sizes
+        lx, ly = 8, 8
+        gx = ((params["width"] + lx - 1) // lx) * lx
+        gy = ((params["height"] + ly - 1) // ly) * ly
+
+        # Enqueue kernel
+        kernel_evt = cl.enqueue_nd_range_kernel(q,
+                                                self._kernel,
+                                                global_work_size=(gx, gy),
+                                                local_work_size=(lx, ly))
+
+        # Non-blocking read: returns an event that depends on kernel_evt
+        read_evt = cl.enqueue_copy(q, out_np, out_buf,
+                                   is_blocking=False, wait_for=[kernel_evt])
+
+        # Returns reshaped view and completion event
+        return out_np.reshape((params["height"], params["width"])), read_evt
+
 
     def render(self, fractal: Fractal, vp: Viewport, settings: RenderSettings,
                reference: Optional[Dict[str, Any]] = None) -> np.ndarray:
-        ctx, queue = self._get_ctx_queue()
-
-        args = fractal.get_kernel_args(vp, settings)
-
-        out_np = np.empty(args["width"] * args["height"], dtype=settings.precision)
-        out_buf = cl.Buffer(ctx, cl.mem_flags.WRITE_ONLY, out_np.nbytes)
-
-        try:
-            self._kernel.set_arg(0, self._cast(args["min_x"]))
-            self._kernel.set_arg(1, self._cast(args["max_x"]))
-            self._kernel.set_arg(2, self._cast(args["min_y"]))
-            self._kernel.set_arg(3, self._cast(args["max_y"]))
-            self._kernel.set_arg(4, out_buf)
-            self._kernel.set_arg(5, np.int32(args["width"]))
-            self._kernel.set_arg(6, np.int32(args["height"]))
-            self._kernel.set_arg(7, np.int32(args["max_iter"]))
-            self._kernel.set_arg(8, np.int32(args["samples"]))
-
-            # Conservative local and padded global
-            lx, ly = 8, 8
-            gx = ((args["width"]  + lx - 1) // lx) * lx
-            gy = ((args["height"] + ly - 1) // ly) * ly
-            cl.enqueue_nd_range_kernel(queue, self._kernel, (gx, gy), (lx, ly))
-            cl.enqueue_copy(queue, out_np, out_buf)
-            queue.finish()
-        finally:
-            try: out_buf.release()
-            except Exception as e:
-                print("Error when releasing output buffer: ", e)
-                pass
-
-        return out_np.reshape((args["height"], args["width"]))
+        view, evt = self.render_async(fractal, vp, settings, reference)
+        evt.wait()
+        return view

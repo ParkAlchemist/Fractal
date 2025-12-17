@@ -13,9 +13,9 @@ from PySide6.QtWidgets import (
 )
 
 from coloring.palettes import palettes
-from rendering.render import FullImageRenderer
-from utils.enums import Kernel, ColoringMode, EngineMode, Tools, Precisions
-from utils.utils import available_backends
+from rendering.render_controller import RenderController
+from utils.enums import BackendType, ColoringMode, EngineMode, Tools, PrecisionMode
+from utils.backend_helpers import available_backends
 from ui.view_components import (AspectRatioContainer, ViewState,
                                 RenderSizePolicy, TileCompositor)
 
@@ -45,7 +45,7 @@ class FractalViewer(QMainWindow):
         self.precompute_during = False
 
         # Renderer
-        self.renderer: FullImageRenderer | None = None
+        self.renderer: RenderController | None = None
         self.view_image: QImage | None = None
         self.cached_image: QImage | None = None
 
@@ -311,19 +311,19 @@ class FractalViewer(QMainWindow):
         if self.renderer:
             self.renderer.set_coloring_mode(mode)
             self.log(f"Set coloring mode to {mode.name}.")
-            self.renderer.render_image()
+            self.renderer.color_image()
 
     def change_exter_palette(self, name):
         if self.renderer:
             self.renderer.set_exter_palette(name)
             self.log(f"Set Exterior palette to {name}.")
-            self.renderer.render_image()
+            self.renderer.color_image()
 
     def change_inter_palette(self, name):
         if self.renderer:
             self.renderer.set_inter_palette(name)
             self.log(f"Set Interior palette to {name}.")
-            self.renderer.render_image()
+            self.renderer.color_image()
 
     def apply_view_settings(self):
         try:
@@ -425,11 +425,11 @@ class FractalViewer(QMainWindow):
         # Kernel
         kernel_str = self.kernel_input.currentText().upper()
         if kernel_str == "OPENCL":
-            new_kernel = Kernel.OPENCL
+            new_kernel = BackendType.OPENCL
         elif kernel_str == "CUDA":
-            new_kernel = Kernel.CUDA
+            new_kernel = BackendType.CUDA
         elif kernel_str == "CPU":
-            new_kernel = Kernel.CPU
+            new_kernel = BackendType.CPU
         else:
             self.log(f"Incorrect Kernel selected: {kernel_str}.")
             raise ValueError("Incorrect Kernel")
@@ -473,10 +473,10 @@ class FractalViewer(QMainWindow):
 
         # Lazily construct renderer
         if self.renderer is None:
-            self.renderer = FullImageRenderer(
+            self.renderer = RenderController(
                 render_w, render_h,
                 palettes[self.default_palette_name],
-                kernel=Kernel.AUTO,
+                kernel=BackendType.AUTO,
                 max_iter=200, samples=2,
                 coloring_mode=ColoringMode.EXTERIOR,
                 precision=np.float32
@@ -495,13 +495,11 @@ class FractalViewer(QMainWindow):
         min_y = self.state.center_y - (render_h / 2) * scale
         max_y = self.state.center_y + (render_h / 2) * scale
 
-        print("Min_x=", min_x, "Max_x=", max_x, "Min_y=", min_y, "Max_y=", max_y, "Zoom=", self.state.zoom)
-
         # Precision selection
         if self.state.zoom > 1e6:
-            precision_mode = Precisions.Double
+            precision_mode = PrecisionMode.Double
         else:
-            precision_mode = Precisions.Single
+            precision_mode = PrecisionMode.Single
         self.renderer.set_precision(precision_mode)
 
         self.log(
@@ -526,9 +524,9 @@ class FractalViewer(QMainWindow):
 
         # Precision
         if zoom > 1e6:
-            precision_mode = Precisions.Double
+            precision_mode = PrecisionMode.Double
         else:
-            precision_mode = Precisions.Single
+            precision_mode = PrecisionMode.Single
         self.renderer.set_precision(precision_mode)
         self.renderer.set_image_size(render_w, render_h)
 

@@ -100,8 +100,7 @@ class AdaptiveTileEngine(BaseRenderEngine):
                  sample_stride: int = 8,
                  on_tile: Optional[Callable[[int, int, np.ndarray], None]] = None,
                  parallel: bool = True,
-                 max_workers: int = 0,
-                 parallel_for_gpu_only: bool = True):
+                 max_workers: int = 0):
         super().__init__(on_tile)
         self.min_tile = int(min_tile)
         self.max_tile = int(max_tile)
@@ -112,7 +111,6 @@ class AdaptiveTileEngine(BaseRenderEngine):
         # Concurrency controls
         self.parallel = bool(parallel)
         self.max_workers = int(max_workers)
-        self.parallel_for_gpu_only = bool(parallel_for_gpu_only)
 
         # Motion state
         self._last_viewport: Optional[Viewport] = None
@@ -164,7 +162,7 @@ class AdaptiveTileEngine(BaseRenderEngine):
 
         # Decide concurrency
         backend_name = getattr(backend, "name", "").upper()
-        allow_parallel = self.parallel and (not self.parallel_for_gpu_only or backend_name == "CPU")
+        allow_parallel = self.parallel and (not backend_name == "CPU")
         workers = (self.max_workers if self.max_workers > 0 else max(1, (os.cpu_count() or 4))) if allow_parallel else 1
 
         # Thread pool
@@ -188,17 +186,10 @@ class AdaptiveTileEngine(BaseRenderEngine):
 
             st = make_settings(settings, settings.max_iter)
 
-            # Higher sample amounts for more computation heavy tiles
-            # for smoother image quality
-            if phase == 'refine':
-                if ti.iteration_variance > 0.5 or ti.boundary_likelihood > 0.5:
-                    st.samples = depth * 2 if depth != 0 else 1
-
             # Render
             t0 = time.perf_counter()
-            if hasattr(backend, "render_async") and self.parallel:
+            if hasattr(backend, "render_async") and allow_parallel:
                 tile_iters, done_evt = backend.render_async(fractal, sub_vp, st)
-
                 try:
                     done_evt.synchronize()  # CUDA
                 except AttributeError:
@@ -209,8 +200,8 @@ class AdaptiveTileEngine(BaseRenderEngine):
 
             with canvas_lock:
                 canvas[ti.y0: ti.y0 + ti.h, ti.x0: ti.x0 + ti.w] = tile_iters
-            if callable(self.on_tile):
-                self.on_tile(ti.x0, ti.y0, tile_iters) # emit
+                if callable(self.on_tile):
+                    self.on_tile(ti.x0, ti.y0, tile_iters) # emit
 
             ti.iteration_variance = self._compute_iteration_variance(tile_iters)
             ti.boundary_likelihood = self._compute_boundary_likelihood(tile_iters)
@@ -232,7 +223,7 @@ class AdaptiveTileEngine(BaseRenderEngine):
                     # Queue empties, and all tasks done -> return
                     break
 
-                while popped is not None and (executor is None or len(inflight) < workers):
+                while popped is not None:
 
                     phase, ti = popped
                     if executor is None:
@@ -267,10 +258,11 @@ class AdaptiveTileEngine(BaseRenderEngine):
                                                depth=child[4],
                                                enqueue_time=time.perf_counter())
                                 self.scheduler.enqueue(cti, visible=self._visible(cti, W, H))
+        except Exception as e:
+            print(f"Error in render loop: {e}")
         finally:
             if executor is not None:
                 executor.shutdown(wait=False)
-
         return canvas
 
 
@@ -386,7 +378,7 @@ class AdaptiveTileEngine(BaseRenderEngine):
     @staticmethod
     def _compute_boundary_likelihood(tile_iters: np.ndarray) -> float:
         """
-        Computes the likelihood of the given tile being near a set boundary
+        Computes the likelihood of the given tile being near the set boundary
         :return: likelihood [0.0, 1.0]
         """
         total = tile_iters.size

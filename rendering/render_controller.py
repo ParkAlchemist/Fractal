@@ -194,7 +194,7 @@ class RenderController(QObject):
         self.image_updated.emit(qimage.copy(), int(rw), int(rh))
 
     def _apply_palette(self):
-        return self.coloring.apply(self._iter_buf.astype(np.float64), self.coloring_mode,
+        return self.coloring.apply(self._iter_buf.astype(self.precision), self.coloring_mode,
                                    self.exter_palette, self.inter_palette,
                                    interior_color=self.inter_color)
 

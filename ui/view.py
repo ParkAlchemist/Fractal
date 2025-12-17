@@ -193,7 +193,7 @@ class FractalViewer(QMainWindow):
         render_layout.addRow("Max quadtree depth:", self.max_depth_input)
         render_layout.addRow("Sample stride:", self.sample_stride_input)
 
-        self.parallel_chk = QCheckBox("Parallel (CPU)")
+        self.parallel_chk = QCheckBox("Parallel (GPU)")
         self.parallel_chk.setChecked(self.adaptive_opts["parallel"])
         self.max_workers_input = QLineEdit(str(self.adaptive_opts["max_workers"]))
         render_layout.addRow(self.parallel_chk)

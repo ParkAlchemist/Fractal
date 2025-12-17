@@ -9,7 +9,7 @@ from backends.backend_base import Backend
 class OpenClBackend(Backend):
     name = "OPENCL"
 
-    def __init__(self, prefer_cpu=False, queues: int = 0, out_of_order: bool = False):
+    def __init__(self, prefer_cpu=False, queues: int = 4, out_of_order: bool = False):
 
         clear_cache_lock()
 

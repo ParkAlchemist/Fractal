@@ -9,7 +9,7 @@ from backends.backend_base import Backend
 class CudaBackend(Backend):
     name = "CUDA"
 
-    def __init__(self, streams: int = 0):
+    def __init__(self, streams: int = 4):
         if not cuda.is_available():
             raise RuntimeError("CUDA not available")
         # Stream pool: 0 -> create on demand; else create N streams
@@ -44,7 +44,7 @@ class CudaBackend(Backend):
         Asynchronous rendering.
         - Allocates device output
         - Launches kernel into a stream
-        - Copies back into pinned host array asynchronously
+        - Copies back into a pinned host array asynchronously
         - Returns (host_array_view, completion_event)
         """
         params = fractal.get_backend_params(vp, settings)
@@ -77,7 +77,7 @@ class CudaBackend(Backend):
 
         # Create an event and record it after copy
         done_evt = cuda.event(timing=False)
-        s.record_event(done_evt)
+        done_evt.record(stream=s)
 
         return h_out, done_evt
 

@@ -7,6 +7,9 @@ from backends.backend_base import Backend
 
 
 class CudaBackend(Backend):
+    """
+    Backend for CUDA-based fractal rendering.
+    """
     name = "CUDA"
 
     def __init__(self, streams: int = 4):
@@ -19,27 +22,27 @@ class CudaBackend(Backend):
         self.kernel_func = None
         self._cast = None
 
-    def _get_stream(self) -> cuda.cudadrv.driver.Stream:
+    def _get_stream(self) -> Any:
         # Round-robin allocation or creation on demand
         if not self.streams:
-            return cuda.stream()
+            raise RuntimeError("CUDA backend is closed or has no streams")
         s = self.streams.pop(0)
         self.streams.append(s)
         return s
 
     def compile(self, fractal: Fractal, settings: RenderSettings) -> None:
 
-        sepc = fractal.get_backend_spec(settings, self.name)
-        self.kernel_func = sepc["kernel_source"]
-        self._cast = sepc["precision"]
+        spec = fractal.get_backend_spec(settings, self.name)
+        self.kernel_func = spec["kernel_source"]
+        self._cast = spec["precision"]
 
     def render_async(self,
                      fractal: Fractal,
                      vp: Viewport,
                      settings: RenderSettings,
                      reference: Optional[Dict[str, Any]] = None,
-                     stream: Optional[cuda.cudadrv.driver.Stream] = None,
-                     ) -> Tuple[np.ndarray, cuda.cudadrv.driver.Stream]:
+                     stream: Optional[cuda.stream] = None,
+                     ) -> Tuple[np.ndarray, cuda.stream]:
         """
         Asynchronous rendering.
         - Allocates device output
@@ -47,13 +50,16 @@ class CudaBackend(Backend):
         - Copies back into a pinned host array asynchronously
         - Returns (host_array_view, completion_event)
         """
+
+        if self.kernel_func is None:
+            raise RuntimeError("Backend has not been compiled yet")
+
         params = fractal.get_backend_params(vp, settings)
 
-        if self.blocks_per_grid is None:
-            self.blocks_per_grid = (
-                (params["width"] + self.threads_per_block[0] - 1) // self.threads_per_block[0],
-                (params["height"] + self.threads_per_block[1] - 1) // self.threads_per_block[1],
-            )
+        self.blocks_per_grid = (
+            (params["width"] + self.threads_per_block[0] - 1) // self.threads_per_block[0],
+            (params["height"] + self.threads_per_block[1] - 1) // self.threads_per_block[1],
+        )
 
         s = stream or self._get_stream()
 
@@ -89,3 +95,17 @@ class CudaBackend(Backend):
         h_out, evt = self.render_async(fractal, vp, settings, reference)
         evt.synchronize()
         return h_out
+
+    def close(self) -> None:
+        if self.streams:
+            for s in self.streams:
+                try:
+                    s.close()
+                except Exception as e:
+                    print(f"Error in closing stream: {e}")
+                    pass
+            self.streams.clear()
+            self.streams = None
+
+        self.kernel_func = None
+        self._cast = None

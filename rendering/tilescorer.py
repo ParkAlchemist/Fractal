@@ -4,6 +4,9 @@ from typing import Dict, Tuple
 
 @dataclass
 class Weights:
+    """
+    Holds the weights for different scoring factors.
+    """
     vis: float
     center: float
     area: float
@@ -41,11 +44,11 @@ class TileScorer:
         center_x, center_y = frame_width * 0.5, frame_height * 0.5
         tile_center_x, tile_center_y = x0 + w * 0.5, y0 + h * 0.5
         dist = math.hypot(tile_center_x - center_x, tile_center_y - center_y)
-        dmax = math.hypot(center_x, center_y)
+        d_max = math.hypot(center_x, center_y)
         c_raw = 1.0 / (1.0 + dist)
-        c_min = 1.0 / (1.0 + dmax)
-        denom = (1.0 - c_min) if (1.0 - c_min) > 1e-12 else 1.0
-        return max(0.0, min(1.0, (c_raw - c_min) / denom))
+        c_min = 1.0 / (1.0 + d_max)
+        denominator = (1.0 - c_min) if (1.0 - c_min) > 1e-12 else 1.0
+        return max(0.0, min(1.0, (c_raw - c_min) / denominator))
 
     @staticmethod
     def _area_on_screen(w: int, h: int,

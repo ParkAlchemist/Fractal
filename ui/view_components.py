@@ -60,6 +60,9 @@ class AspectRatioContainer(QWidget):
 # ---------- View state & math ----------
 @dataclass
 class ViewState:
+    """
+    Holds the current view state and provides methods for manipulating it.
+    """
     center_x: float = -0.5
     center_y: float = 0.0
     zoom: float = 250.0        # pixels per world-unit on the *render frame*
@@ -93,6 +96,10 @@ class ViewState:
 
 # ---------- Render size policy (target resolution + optional LOD) ----------
 class RenderSizePolicy:
+    """
+    Manages the size of the rendered image based on target resolution and aspect ratio.
+    Optionally resizes to a specified pitch multiple for GPU friendliness.
+    """
     def __init__(self, pitch_multiple: int = 32):
         self.pitch_multiple = max(1, int(pitch_multiple))
         self.target_quality = "1080p"  # default

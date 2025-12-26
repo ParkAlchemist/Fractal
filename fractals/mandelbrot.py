@@ -13,6 +13,9 @@ from kernel_sources.opencl.mandelbrot import (mandelbrot_kernel_cl_f32,
 
 @dataclass
 class MandelbrotFractal(Fractal):
+    """
+    Mandelbrot fractal type.
+    """
     name: str = "mandelbrot"
 
     def get_backend_params(self, vp: Viewport, st: RenderSettings) -> Dict[str, Any]:

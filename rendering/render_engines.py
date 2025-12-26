@@ -176,8 +176,7 @@ class AdaptiveTileEngine(BaseRenderEngine):
                                precision=base.precision)
             return s
 
-        def compute_tile(ti: TileInfo, phase: str = None) -> Tuple[TileInfo, None, None] | \
-                                                             Tuple[TileInfo, Any, bool | Any]:
+        def compute_tile(ti: TileInfo, phase: str = None) -> Tuple[TileInfo, Any, bool | None]:
             ti.w = min(ti.w, W - ti.x0)
             ti.h = min(ti.h, H - ti.y0)
             if ti.w <= 0 or ti.h <= 0: return ti, None, None
@@ -206,7 +205,7 @@ class AdaptiveTileEngine(BaseRenderEngine):
             ti.iteration_variance = self._compute_iteration_variance(tile_iters)
             ti.boundary_likelihood = self._compute_boundary_likelihood(tile_iters)
 
-            # decide wether tile should be split
+            # decide whether the tile should be split
             split = (ti.depth < self.max_depth) and self._should_split(tile_iters, t_ms, ti.w, ti.h)
             return ti, tile_iters, split
 
@@ -263,6 +262,7 @@ class AdaptiveTileEngine(BaseRenderEngine):
         finally:
             if executor is not None:
                 executor.shutdown(wait=False)
+            backend.close()
         return canvas
 
 
@@ -279,7 +279,8 @@ class AdaptiveTileEngine(BaseRenderEngine):
             for fut in as_completed(inflight, timeout=timeout):
                 done.add(fut)
                 break
-        except Exception:
+        except Exception as e:
+            print(f"Error in waiting for futures: {e}")
             pass
         return done, inflight
 
@@ -305,7 +306,7 @@ class AdaptiveTileEngine(BaseRenderEngine):
     def _should_split(self, tile_iters: np.ndarray,
                       t_ms: float, w: int, h: int) -> bool:
         """
-        Check wether given tile should be split or not
+        Check whether the given tile should be split or not
         :return: True or False
         """
         if w <= self.min_tile and h <= self.min_tile:
@@ -328,9 +329,9 @@ class AdaptiveTileEngine(BaseRenderEngine):
         h2 = max(self.min_tile, self._align_32(h // 2))
         # 2x2 quad children
         children = [
-            (x0, y0, w2, h2, depth + 1),
-            (x0 + w2, y0, w - w2, h2, depth + 1),
-            (x0, y0 + h2, w2, h - h2, depth + 1),
+            (x0,      y0,      w2,     h2,     depth + 1),
+            (x0 + w2, y0,      w - w2, h2,     depth + 1),
+            (x0,      y0 + h2, w2,     h - h2, depth + 1),
             (x0 + w2, y0 + h2, w - w2, h - h2, depth + 1),
         ]
         # Clamp to image bounds
@@ -346,8 +347,8 @@ class AdaptiveTileEngine(BaseRenderEngine):
     def _make_sub_viewport(vp: Viewport, x0: int, y0: int,
                            w: int, h: int) -> Viewport:
         """
-        Creates a subviewport on given coordinates from given viewport
-        :return: subviewport
+        Creates a sub_viewport on given coordinates from the given viewport
+        :return: sub_viewport
         """
         W, H = vp.width, vp.height
         sx, ex = x0 / W, (x0 + w) / W
@@ -361,14 +362,14 @@ class AdaptiveTileEngine(BaseRenderEngine):
     @staticmethod
     def _visible(ti: TileInfo, W: int, H: int) -> bool:
         """
-        Checks wether given tile is visible in the viewport
+        Checks whether the given tile is visible in the viewport
         :return: True or False
         """
         return ti.x0 < W and ti.y0 < H and ti.w > 0 and ti.h > 0
 
     def _compute_iteration_variance(self, tile_iters: np.ndarray) -> float:
         """
-        Computes the iteration variance for given tile
+        Computes the iteration variance for a given tile
         :return: iteration variance
         """
         sample = tile_iters[::self.sample_stride, ::self.sample_stride]

@@ -6,6 +6,9 @@ from backends.backend_base import Backend
 
 
 class CpuBackend(Backend):
+    """
+    Backend for CPU-based fractal rendering.
+    """
     name = "CPU"
 
     def __init__(self):
@@ -21,6 +24,9 @@ class CpuBackend(Backend):
     def render(self, fractal: Fractal, vp: Viewport, settings: RenderSettings,
                reference: Optional[Dict[str, Any]] = None) -> np.ndarray:
 
+        if self.kernel_func is None:
+            raise RuntimeError("Backend has not been compiled yet")
+
         params = fractal.get_backend_params(vp, settings)
 
         real = np.linspace(params["min_x"], params["max_x"], params["width"],
@@ -32,3 +38,7 @@ class CpuBackend(Backend):
         return self.kernel_func(real_grid, imag_grid,
                                 params["width"], params["height"],
                                 params["max_iter"], params["samples"])
+
+    def close(self) -> None:
+        self.kernel_func = None
+        self.precision = None

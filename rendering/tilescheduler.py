@@ -9,6 +9,9 @@ from fractals.fractal_base import Viewport
 
 @dataclass
 class TileInfo:
+    """
+    Represents information about a tile for render scheduling.
+    """
     x0: int
     y0: int
     w: int
@@ -36,9 +39,9 @@ class TileScheduler:
         }
         self.motion_vec: Tuple[float, float] = (0.0, 0.0)
         self._moving: bool = False
-        self._W = 0
-        self._H = 0
-        self._now = time.perf_counter()
+        self._W: int = 0
+        self._H: int = 0
+        self._now: float = time.perf_counter()
 
     def clear(self) -> None:
         """
@@ -51,7 +54,7 @@ class TileScheduler:
     def update_view(self, W: int, H: int, current_viewport: Viewport,
                     last_viewport: Viewport) -> None:
         """
-        Updates parameters based on new viewport.
+        Updates parameters based on the new viewport.
         :return: None
         """
         self._W = W
@@ -99,7 +102,7 @@ class TileScheduler:
     def pop_next(self) -> Optional[Tuple[str, TileInfo]]:
         """
         Yields next tile from priority queue.
-        :return: Next tile or None if queue is empty
+        :return: Next tile or None if the queue is empty
         """
         for phase in ('seam', 'refine', 'prefetch', 'bg'):
             if self.queues[phase]:

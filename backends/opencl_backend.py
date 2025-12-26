@@ -7,14 +7,17 @@ from fractals.fractal_base import Fractal, Viewport, RenderSettings
 from backends.backend_base import Backend
 
 class OpenClBackend(Backend):
+    """
+    Backend for OpenCL-based fractal rendering.
+    """
     name = "OPENCL"
 
-    def __init__(self, prefer_cpu=False, queues: int = 4, out_of_order: bool = False):
+    def __init__(self, prefer_cpu: bool = False, queues: int = 4, out_of_order: bool = False):
 
         clear_cache_lock()
 
-        plats = cl.get_platforms()
-        self.device = None
+        plats: list[cl.Platform] = cl.get_platforms()
+        self.device: cl.Device | None = None
         if prefer_cpu:
             for p in plats:
                 devs = p.get_devices(cl.device_type.CPU)
@@ -31,21 +34,36 @@ class OpenClBackend(Backend):
             raise RuntimeError("No OpenCL devices found.")
 
         # Context
-        self.ctx = cl.Context([self.device])
+        self.ctx: cl.Context | None = cl.Context([self.device])
 
         # Queue properties
         props: cl.command_queue_properties = 0
         if out_of_order:
             props |= cl.command_queue_properties.OUT_OF_ORDER_EXEC_MODE_ENABLE
 
-        self.queues = [cl.CommandQueue(self.ctx, self.device, properties=props) for _ in range(queues)] if queues > 0 else []
+        self.queues: list[cl.CommandQueue] | None = [cl.CommandQueue(self.ctx, self.device, properties=props) for _ in range(queues)] if queues > 0 else []
+
+        self._kernel: cl.Kernel | None = None
+        self._precision_cast = np.float32
+
+    def close(self) -> None:
+        if self.queues:
+            for q in self.queues:
+                try:
+                    q.finish()
+                except Exception as e:
+                    print(f"Error in closing queue: {e}")
+                    pass
+            self.queues.clear()
+            self.queues = None
 
         self._kernel = None
-        self._precision_cast = np.float32
+        self.device = None
+        self.ctx = None
 
     def _get_queue(self) -> cl.CommandQueue:
         if not self.queues:
-            return cl.CommandQueue(self.ctx, self.device)
+            raise RuntimeError("Backend has been closed or not initialized")
 
         q = self.queues.pop(0)
         self.queues.append(q)
@@ -70,6 +88,10 @@ class OpenClBackend(Backend):
         - Enqueue non-blocking read into a host array
         - Return (host_array, completion_event)
         """
+
+        if self._kernel is None:
+            raise RuntimeError("Backend has not been compiled yet")
+
         q = queue or self._get_queue()
         params = fractal.get_backend_params(vp, settings)
 

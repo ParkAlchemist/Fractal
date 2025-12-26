@@ -128,7 +128,7 @@ class FractalViewer(QMainWindow):
         # ----- Side dock: Controls -----
         self.side_menu = QDockWidget("Controls", self)
         self.side_menu.setAllowedAreas(Qt.DockWidgetArea.RightDockWidgetArea)
-        self.side_menu.setFeatures(QDockWidget.NoDockWidgetFeatures)
+        self.side_menu.setFeatures(QDockWidget.DockWidgetFeature.NoDockWidgetFeatures)
         tabs = QTabWidget()
         self.side_menu.setWidget(tabs)
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.side_menu)
@@ -271,7 +271,7 @@ class FractalViewer(QMainWindow):
         # Log dock
         self.log_dock = QDockWidget("Log", self)
         self.log_dock.setAllowedAreas(Qt.DockWidgetArea.RightDockWidgetArea)
-        self.log_dock.setFeatures(QDockWidget.NoDockWidgetFeatures)
+        self.log_dock.setFeatures(QDockWidget.DockWidgetFeature.NoDockWidgetFeatures)
         self.log_view = QPlainTextEdit(self)
         self.log_view.setReadOnly(True)
         self.log_view.setMaximumBlockCount(5000)
@@ -292,7 +292,7 @@ class FractalViewer(QMainWindow):
         def copy_all():
             self.log_view.selectAll()
             self.log_view.copy()
-            self.log_view.moveCursor(self.log_view.textCursor().End)
+            self.log_view.moveCursor(self.log_view.textCursor().MoveOperation.End)
 
         btn_copy.clicked.connect(copy_all)
         log_controls.addWidget(btn_clear)

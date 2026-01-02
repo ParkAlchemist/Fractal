@@ -1,8 +1,6 @@
 import sys
-import time
 from datetime import datetime
 
-import numpy as np
 from PySide6.QtCore import Qt, QTimer, QPropertyAnimation, QEasingCurve
 from PySide6.QtGui import QPixmap, QPainter, QImage, QTextCursor, QWheelEvent
 from PySide6.QtWidgets import (
@@ -12,8 +10,10 @@ from PySide6.QtWidgets import (
     QPlainTextEdit
 )
 
+from api.render_api import RenderAPI
+from adapters.qt_render_bridge import QtRenderBridge
 from coloring.palettes import palettes
-from rendering.render_controller import RenderController
+from rendering.service import RenderService
 from utils.enums import BackendType, ColoringMode, EngineMode, Tools, PrecisionMode
 from utils.backend_helpers import available_backends
 from ui.view_components import (AspectRatioContainer, ViewState,
@@ -28,8 +28,8 @@ class FractalViewer(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Fractal Viewer")
-        self.window_height = 900
         self.aspect_ratio = 16 / 9
+        self.window_height = 900
         self.window_width = int(self.window_height * self.aspect_ratio)
         self.setGeometry(100, 100, self.window_width, self.window_height)
 
@@ -39,13 +39,9 @@ class FractalViewer(QMainWindow):
 
         # Render policy (target size / lod)
         self.rsize = RenderSizePolicy(pitch_multiple=32)
-        self.rsize.target_quality = "720p"
-        # Progressive disabled by default; set e.g., [0.25, 0.5, 1.0] to enable
-        self.rsize.lod_steps = [1.0]
-        self.precompute_during = False
+        self.rsize.target_quality = "1080p"
 
-        # Renderer
-        self.renderer: RenderController | None = None
+        # Images
         self.view_image: QImage | None = None
         self.cached_image: QImage | None = None
 
@@ -85,8 +81,24 @@ class FractalViewer(QMainWindow):
         self.compositor = TileCompositor(self.display, self.stats_label, parent=self)
         self.compositor.tile_queue_empty.connect(self._final_render)
 
+        # Initialize RenderAPI
+        render_w, render_h = self.rsize.compute_target_size(self.aspect_ratio)
+        service = RenderService(width=render_w, height=render_h, palette=palettes["Classic"])
+        self.api = RenderAPI(service)
+
+        # Bridge: Qt signals for the UI
+        self.bridge = QtRenderBridge(self.api, parent=self)
+        self.bridge.image_updated.connect(self.update_image)
+        self.bridge.tile_ready.connect(self._on_tile_ready)
+        self.bridge.log_text.connect(self.log)
+
         # UI sets
         self._build_ui()
+
+        # Initial render
+        self.apply_default_settings()
+        self.api.set_view(self.state.center_x, self.state.center_y, self.state.zoom)
+        self._start_render()
 
     def _build_ui(self):
         # ----- Central layout -----
@@ -232,13 +244,13 @@ class FractalViewer(QMainWindow):
         self.exter_palette_input = QComboBox()
         self.exter_palette_input.addItems(palettes.keys())
         self.exter_palette_input.setCurrentText(self.default_palette_name)
-        self.exter_palette_input.currentTextChanged.connect(self.change_exter_palette)
+        self.exter_palette_input.currentTextChanged.connect(self.apply_palette)
         palette_layout.addRow("Exterior Palette: ", self.exter_palette_input)
 
         self.inter_palette_input = QComboBox()
         self.inter_palette_input.addItems(palettes.keys())
         self.inter_palette_input.setCurrentText(self.default_palette_name)
-        self.inter_palette_input.currentTextChanged.connect(self.change_inter_palette)
+        self.inter_palette_input.currentTextChanged.connect(self.apply_palette)
         palette_layout.addRow("Interior Palette: ", self.inter_palette_input)
 
         palette_tab.setLayout(palette_layout)
@@ -308,22 +320,23 @@ class FractalViewer(QMainWindow):
 
     # ---------- Palette/View/Render setting handlers ----------
     def change_coloring_mode(self, mode):
-        if self.renderer:
-            self.renderer.set_coloring_mode(mode)
-            self.log(f"Set coloring mode to {mode.name}.")
-            self.renderer.color_image()
+        pass
 
-    def change_exter_palette(self, name):
-        if self.renderer:
-            self.renderer.set_exter_palette(name)
-            self.log(f"Set Exterior palette to {name}.")
-            self.renderer.color_image()
+    def apply_palette(self):
+        exter = self._get_combo(self.exter_palette_input, 'Classic')
+        inter = self._get_combo(self.inter_palette_input, 'Classic')
+        self.api.set_palettes(exter, inter)
+        self.log(f"Applied palettes: {exter} exterior, {inter} interior.")
+        self._start_render()
 
-    def change_inter_palette(self, name):
-        if self.renderer:
-            self.renderer.set_inter_palette(name)
-            self.log(f"Set Interior palette to {name}.")
-            self.renderer.color_image()
+    def apply_default_settings(self):
+        (self.api.configure()
+         .resolution(self.rsize.target_quality)
+         .max_iter(int(self._get_combo(self.iter_input, 200)))
+         .samples(int(self._get_combo(self.samples_input, 2)))
+         .engine_mode(EngineMode.FULL_FRAME)
+         .backend(BackendType.AUTO)
+         .apply())
 
     def apply_view_settings(self):
         try:
@@ -349,25 +362,30 @@ class FractalViewer(QMainWindow):
                                                         target_h_old)
                 self.log(f"Adjusted zoom to {self.state.zoom:.6g} for aspect {prev_ar:.4g} → {new_ar:.4g}.")
 
-            self.state.center_x = float(self.center_x_input.text())
-            self.state.center_y = float(self.center_y_input.text())
-            self.state.zoom = float(self.zoom_input.text())
-            self.state.zoom_factor = float(self.zoom_factor_input.text())
+            # Fetch new view inputs
+            center_x = self._get_float(self.center_x_input, self.state.center_x)
+            center_y = self._get_float(self.center_y_input, self.state.center_y)
+            zoom = self._get_float(self.zoom_input, self.state.zoom)
+            zoom_factor = self._get_float(self.zoom_factor_input, self.state.zoom_factor)
+
+            # Update view state
+            self.state.center_x = center_x
+            self.state.center_y = center_y
+            self.state.zoom = zoom
+            self.state.zoom_factor = zoom_factor
+
+            # Apply view changes to renderer
+            self.api.set_view(center_x, center_y, zoom)
+
             self.log(
                 f"View updated: center=({self.state.center_x:.6g},{self.state.center_y:.6g}), "
                 f"zoom={self.state.zoom:.6g}, zoom_factor={self.state.zoom_factor:.3g}."
             )
-            self.render_fractal()
+            self._start_render()
         except ValueError as e:
             self.log(f"Error in view inputs: {e}")
 
     def apply_render_settings(self):
-        # Ensure renderer exists
-        if self.renderer is None:
-            self.render_fractal()
-            if self.renderer is None:
-                self.log("Renderer was not created; aborting apply_render_settings.")
-                return
 
         # Resolution preset
         prev_w, prev_h = self.rsize.compute_target_size(self.aspect_ratio)
@@ -379,165 +397,77 @@ class FractalViewer(QMainWindow):
             self.log(f"Resolution preset changed to {self.rsize.target_quality}.")
             self.state.set_frame_size(new_w, new_h)
 
-        # Max iter & samples
-        try:
-            max_iter = int(self.iter_input.currentText())
-        except Exception as e:
-            self.log(f"{e}; Invalid max_iter input: {self.iter_input.currentText()}.")
-            max_iter = self.renderer.max_iter
+        resolution = self._get_combo(self.res_input, '1080p')
+        max_iter = int(self._get_combo(self.iter_input, 200))
+        samples = int(self._get_combo(self.samples_input, 2))
 
-        try:
-            samples = int(self.samples_input.currentText())
-        except Exception as e:
-            self.log(f"{e}; Invalid samples input: {self.samples_input.currentText()}.")
-            samples = self.renderer.samples
-
-        if self.renderer.max_iter != max_iter:
-            self.renderer.set_max_iter(max_iter)
-            self.log(f"Set max_iter to {max_iter}.")
-        if self.renderer.samples != samples:
-            self.renderer.set_samples(samples)
-            self.log(f"Set samples to {samples}.")
-
-        # Engine mode
-        if self.tile_render_check.isChecked():
-            try:
-                tw, th = map(int, self.tile_size_input.text().lower().replace(' ', '').split('x'))
-                if tw <= 0 or th <= 0:
-                    raise ValueError("Tile size must be positive.")
-            except Exception as e:
-                self.log(f"Error in tile size input: {e}. Falling back to 256x256.")
-                tw, th = 256, 256
-
-            if self.adaptive_enabled:
-                self._apply_adaptive_settings()
-                opts = dict(self.adaptive_opts)
-                opts.update({"tile_w": tw, "tile_h": th})
-                self.renderer.set_engine_mode(EngineMode.TILED, tile_w=tw, tile_h=th, adaptive_opts=opts)
-                self.log(f"Engine: ADAPTIVE TILED ({tw}x{th}) with {opts}.")
-            else:
-                self.renderer.set_engine_mode(EngineMode.TILED, tile_w=tw, tile_h=th)
-                self.log(f"Engine: TILED ({tw}x{th}).")
+        if self.tile_render_check.isChecked() and self.adaptive_enable_chk.isChecked():
+            engine_mode = EngineMode.ADAPTIVE
+            self._apply_adaptive_settings()
+        elif self.tile_render_check.isChecked():
+            engine_mode = EngineMode.TILED
         else:
-            self.renderer.set_engine_mode(EngineMode.FULL_FRAME)
-            self.log("Engine: FULL_FRAME.")
+            engine_mode = EngineMode.FULL_FRAME
 
-        # Kernel
-        kernel_str = self.kernel_input.currentText().upper()
+        try:
+            tw, th = map(int, self.tile_size_input.text().lower().replace(" ", "").split('x'))
+        except ValueError:
+            tw, th = 256, 256
+
+        kernel_str = self._get_combo(self.kernel_input, 'CPU').upper()
         if kernel_str == "OPENCL":
-            new_kernel = BackendType.OPENCL
+            backend = BackendType.OPENCL
         elif kernel_str == "CUDA":
-            new_kernel = BackendType.CUDA
-        elif kernel_str == "CPU":
-            new_kernel = BackendType.CPU
+            backend = BackendType.CUDA
         else:
-            self.log(f"Incorrect Kernel selected: {kernel_str}.")
-            raise ValueError("Incorrect Kernel")
+            backend = BackendType.CPU
 
-        if self.renderer.kernel != new_kernel:
-            self.renderer.set_kernel(new_kernel)
-            self.log(f"Kernel set to {kernel_str}.")
+        (self.api.configure()
+         .resolution(resolution)
+         .max_iter(max_iter)
+         .samples(samples)
+         .engine_mode(engine_mode, tile_w=tw, tile_h=th)
+         .adaptive_opts(self.adaptive_opts)
+         .backend(backend)
+         .apply())
 
-        # Trigger render
-        self.render_fractal()
+        self._start_render()
 
     def _apply_adaptive_settings(self):
-        def _get_int(line, default):
-            try:
-                v = int(line.text().strip())
-                return v if v > 0 else default
-            except Exception:
-                return default
-
-        def _get_float(line, default):
-            try:
-                return float(line.text().strip())
-            except Exception:
-                return default
-
-        self.adaptive_opts["min_tile"] = _get_int(self.min_tile_input, self.adaptive_opts["min_tile"])
-        self.adaptive_opts["max_tile"] = _get_int(self.max_tile_input, self.adaptive_opts["max_tile"])
-        self.adaptive_opts["target_ms"] = _get_float(self.target_ms_input, self.adaptive_opts["target_ms"])
-        self.adaptive_opts["max_depth"] = _get_int(self.max_depth_input, self.adaptive_opts["max_depth"])
-        self.adaptive_opts["sample_stride"] = _get_int(self.sample_stride_input, self.adaptive_opts["sample_stride"])
+        self.adaptive_opts["min_tile"] = self._get_int(self.min_tile_input, self.adaptive_opts["min_tile"])
+        self.adaptive_opts["max_tile"] = self._get_int(self.max_tile_input, self.adaptive_opts["max_tile"])
+        self.adaptive_opts["target_ms"] = self._get_float(self.target_ms_input, self.adaptive_opts["target_ms"])
+        self.adaptive_opts["max_depth"] = self._get_int(self.max_depth_input, self.adaptive_opts["max_depth"])
+        self.adaptive_opts["sample_stride"] = self._get_int(self.sample_stride_input, self.adaptive_opts["sample_stride"])
         self.adaptive_opts["parallel"] = bool(self.parallel_chk.isChecked())
-        mw = _get_int(self.max_workers_input, self.adaptive_opts["max_workers"])
+        mw = self._get_int(self.max_workers_input, self.adaptive_opts["max_workers"])
         self.adaptive_opts["max_workers"] = mw if mw >= 0 else 0
         self.log(f"Adaptive settings applied: {self.adaptive_opts}")
 
     # ---------- Rendering control ----------
-    def render_fractal(self):
+    def _start_render(self):
         # Compute target render size based on preset & aspect
         render_w, render_h = self.rsize.compute_target_size(self.aspect_ratio)
         self.state.set_frame_size(render_w, render_h)
-
-        # Lazily construct renderer
-        if self.renderer is None:
-            self.renderer = RenderController(
-                render_w, render_h,
-                palettes[self.default_palette_name],
-                kernel=BackendType.AUTO,
-                max_iter=200, samples=2,
-                coloring_mode=ColoringMode.EXTERIOR,
-                precision=np.float32
-            )
-            # New signal signatures (image carries resolution; tiles too)
-            self.renderer.image_updated.connect(self.update_image)
-            self.renderer.tile_ready.connect(self._on_tile_ready)
-            self.renderer.log_text.connect(self.log)
-        else:
-            self.renderer.set_image_size(render_w, render_h)
-
-        # Compute world bounds from render buffer dimensions
-        scale = 1.0 / self.state.zoom
-        min_x = self.state.center_x - (render_w / 2) * scale
-        max_x = self.state.center_x + (render_w / 2) * scale
-        min_y = self.state.center_y - (render_h / 2) * scale
-        max_y = self.state.center_y + (render_h / 2) * scale
-
-        # Precision selection
-        if self.state.zoom > 1e6:
-            precision_mode = PrecisionMode.Double
-        else:
-            precision_mode = PrecisionMode.Single
-        self.renderer.set_precision(precision_mode)
 
         self.log(
             f"Render frame: size={render_w}x{render_h} "
             f"(display={self.display.width()}x{self.display.height()}), "
             f"center=({self.state.center_x:.6g},{self.state.center_y:.6g}), "
-            f"zoom={self.state.zoom:.6g}, precision={precision_mode.name}."
+            f"zoom={self.state.zoom:.6g}."
         )
 
         self.compositor.clear()
-        self.renderer.render_frame(min_x, max_x, min_y, max_y)
+        self.api.set_view(self.state.center_x, self.state.center_y, self.state.zoom)
 
-    def _start_final_render(self, cx: float, cy: float, zoom: float):
-        render_w, render_h = self.rsize.compute_target_size(self.aspect_ratio)
-        if zoom == 0:
-            zoom = self.state.zoom
-        scale = 1.0 / zoom
-        min_x = cx - (render_w / 2) * scale
-        max_x = cx + (render_w / 2) * scale
-        min_y = cy - (render_h / 2) * scale
-        max_y = cy + (render_h / 2) * scale
-
-        # Precision
-        if zoom > 1e6:
-            precision_mode = PrecisionMode.Double
+        if self.state.zoom > 1e6:
+            precision = PrecisionMode.Double
         else:
-            precision_mode = PrecisionMode.Single
-        self.renderer.set_precision(precision_mode)
-        self.renderer.set_image_size(render_w, render_h)
+            precision = PrecisionMode.Single
 
-        self.log(
-            f"Final render scheduled: size={render_w}x{render_h} "
-            f"(display={self.display.width()}x{self.display.height()}), "
-            f"center=({cx:.6g},{cy:.6g}), zoom={zoom:.6g}, "
-            f"precision={precision_mode.name}."
-        )
-        self.compositor.clear()
-        self.renderer.render_frame(min_x, max_x, min_y, max_y)
+        self.api.set_precision(precision)
+
+        self.api.start_async_render()
 
     # ---------- Renderer callbacks ----------
     def update_image(self, image: QImage, render_w: int, render_h: int):
@@ -573,9 +503,9 @@ class FractalViewer(QMainWindow):
         else:
             self.final_render_pending = True
 
-    def _on_tile_ready(self, gen: int, x: int, y: int, tile_qimg: QImage, frame_w: int, frame_h: int):
+    def _on_tile_ready(self, gen: int, x: int, y: int, tile_img: QImage, frame_w: int, frame_h: int):
         # Route to compositor
-        self.compositor.on_tile_ready(gen, x, y, tile_qimg, frame_w, frame_h)
+        self.compositor.on_tile_ready(gen, x, y, tile_img, frame_w, frame_h)
 
     def _final_render(self):
         if self.final_render_pending:
@@ -669,10 +599,10 @@ class FractalViewer(QMainWindow):
             self.dragging = False
             self.target_x, self.target_y = self.state.center_x, self.state.center_y
             self.target_zoom = self.state.zoom
-            # Commit the preview as current view image
+            # Commit the preview as the current view image
             self.view_image = self.display.pixmap().toImage().copy()
             self.compositor.view_image = self.view_image
-            self.render_fractal()
+            self._start_render()
 
     def update_view(self):
         if not getattr(self, "view_image", None):
@@ -680,8 +610,6 @@ class FractalViewer(QMainWindow):
 
         # Trigger the final render at the target view immediately
         self.compositor.set_paused(True)
-        if self.precompute_during:
-            self._start_final_render(self.target_x, self.target_y, self.target_zoom)
 
         # Fix an animation base for the whole animation
         self.anim_base = self.view_image.copy()
@@ -734,9 +662,7 @@ class FractalViewer(QMainWindow):
 
             self.compositor.set_paused(False)
             self.compositor.flush()
-
-            if not self.precompute_during:
-                self.render_fractal()
+            self._start_render()
 
             if self.final_render_pending:
                 self.final_render_pending = False
@@ -795,6 +721,32 @@ class FractalViewer(QMainWindow):
 
         self.state.zoom = interp_zoom
         self._update_view_tab_fields()
+
+    # ---------- Helpers ------------
+    @staticmethod
+    def _get_int(widget, default):
+        try:
+            if hasattr(widget, "text"):
+                return int(widget.text().strip())
+            elif hasattr(widget, "currentText"):
+                return int(widget.currentText().strip())
+        except ValueError:
+            return default
+
+    @staticmethod
+    def _get_float(widget, default):
+        try:
+            if hasattr(widget, "text"):
+                return float(widget.text().strip())
+            elif hasattr(widget, "currentText"):
+                return float(widget.currentText().strip())
+        except ValueError:
+            return default
+
+    @staticmethod
+    def _get_combo(widget, default):
+        value = widget.currentText().strip()
+        return value if value else default
 
     # ---------- Utilities ----------
     def save_image(self):
@@ -912,13 +864,10 @@ class FractalViewer(QMainWindow):
         """
         Returns the most reliable current render size:
         - Prefer the latest frame size stored in state (from renderer callbacks).
-        - Else fall back to renderer's configured size.
         - Else compute from policy as a last resort.
         """
         if self.state.frame_w and self.state.frame_h:
             return int(self.state.frame_w), int(self.state.frame_h)
-        if self.renderer is not None:
-            return int(self.renderer.width), int(self.renderer.height)
         return self.rsize.compute_target_size(self.aspect_ratio)
 
     def _adjust_zoom_for_resolution_change(self, old_w: int, old_h: int,
@@ -943,12 +892,12 @@ class FractalViewer(QMainWindow):
         if not hasattr(self, "resize_timer"):
             self.resize_timer = QTimer()
             self.resize_timer.setSingleShot(True)
-            self.resize_timer.timeout.connect(self.render_fractal)
+            self.resize_timer.timeout.connect(self._start_render)
         self.resize_timer.start(250)
 
     def closeEvent(self, event):
-        if self.renderer:
-            self.renderer.stop()
+        if self.api:
+            self.api.stop_render()
         event.accept()
 
 
@@ -959,4 +908,3 @@ if __name__ == "__main__":
     app = QApplication(sys.argv)
     viewer = FractalViewer()
     viewer.show()
-    viewer.render_fractal()

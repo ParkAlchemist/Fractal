@@ -1,9 +1,9 @@
 import numpy as np
-from typing import Dict, Any, Optional, Tuple
+from typing import Dict, Any, Optional, Tuple, List
 from numba import cuda
 
-from fractals.fractal_base import Fractal, Viewport, RenderSettings
-from backends.backend_base import Backend
+from fractals.base import Fractal, Viewport, RenderSettings
+from backend.model.base import Backend
 
 
 class CudaBackend(Backend):
@@ -12,9 +12,11 @@ class CudaBackend(Backend):
     """
     name = "CUDA"
 
-    def __init__(self, streams: int = 4):
+    def __init__(self, device: Optional[int] = None, streams: int = 3):
         if not cuda.is_available():
             raise RuntimeError("CUDA not available")
+        if device is not None:
+            cuda.select_device(device)
         # Stream pool: 0 -> create on demand; else create N streams
         self.streams = [cuda.stream() for _ in range(streams)] if streams > 0 else []
         self.threads_per_block = (16, 16)
@@ -22,8 +24,60 @@ class CudaBackend(Backend):
         self.kernel_func = None
         self._cast = None
 
+        # Warm up params
+        self._wu_min_x = -2.0
+        self._wu_max_x = 1.0
+        self._wu_min_y = -1.5
+        self._wu_max_y = 1.5
+        self._wu_width = 64
+        self._wu_height = 64
+        self._wu_max_iter = 64
+        self._wu_samples = 1
+        self._warmed_up = False
+
+    @staticmethod
+    def enumerate_devices() -> List[dict]:
+        """
+        Return a list of dicts compatible with DeviceInfo(**dict)
+        """
+        if not cuda.is_available():
+            return []
+        devices = []
+        for i, gpu in enumerate(cuda.gpus):
+            try:
+                with gpu:
+                    dev = cuda.get_current_device()
+                    name = dev.name
+                    cc = dev.compute_capability
+                    cc_str = f"{cc[0]}.{cc[1]}"
+                    free_b, total_b = cuda.current_context().get_memory_info()
+                    total_mb = int(total_b // (1024.0 ** 2))
+                    free_mb = int(free_b // (1024.0 ** 2))
+                    devices.append({
+                        "device_id": i,
+                        "name": name,
+                        "vendor": "NVIDIA",
+                        "driver": None,
+                        "compute_capability": cc_str,
+                        "memory_total_mb": total_mb,
+                        "memory_free_mb": free_mb,
+                        "is_available": True,
+                    })
+            except Exception:
+                devices.append({
+                    "device_id": i,
+                    "name": f"CUDA Device {i}",
+                    "vendor": "NVIDIA",
+                    "driver": None,
+                    "compute_capability": None,
+                    "memory_total_mb": None,
+                    "memory_free_mb": None,
+                    "is_available": False,
+                })
+        return devices
+
     def _get_stream(self) -> Any:
-        # Round-robin allocation or creation on demand
+        # Round-robin allocation
         if not self.streams:
             raise RuntimeError("CUDA backend is closed or has no streams")
         s = self.streams.pop(0)
@@ -35,6 +89,29 @@ class CudaBackend(Backend):
         spec = fractal.get_backend_spec(settings, self.name)
         self.kernel_func = spec["kernel_source"]
         self._cast = spec["precision"]
+        self._warmup()
+
+    def _warmup(self) -> None:
+        """
+        Used to warm up the backend with a small sample of the fractal to ensure the kernel is compiled by numba.
+        """
+        if self._warmed_up: return
+        self.blocks_per_grid = (
+            (self._wu_width + self.threads_per_block[0] - 1) // self.threads_per_block[0],
+            (self._wu_height + self.threads_per_block[1] - 1) // self.threads_per_block[1],
+        )
+
+        s = self._get_stream()
+
+        d_out = cuda.device_array((self._wu_height, self._wu_width), dtype=self._cast)
+        self.kernel_func[self.blocks_per_grid, self.threads_per_block, s](
+            self._cast(self._wu_min_x), self._cast(self._wu_max_x),
+            self._cast(self._wu_min_y), self._cast(self._wu_max_y),
+            d_out, self._cast(self._wu_max_iter), self._cast(self._wu_samples)
+        )
+
+        s.synchronize()
+        self._warmed_up = True
 
     def render_async(self,
                      fractal: Fractal,
@@ -42,7 +119,7 @@ class CudaBackend(Backend):
                      settings: RenderSettings,
                      reference: Optional[Dict[str, Any]] = None,
                      stream: Optional[cuda.stream] = None,
-                     ) -> Tuple[np.ndarray, cuda.stream]:
+                     ) -> Tuple[np.ndarray, cuda.event]:
         """
         Asynchronous rendering.
         - Allocates device output
@@ -67,7 +144,7 @@ class CudaBackend(Backend):
         d_out = cuda.device_array((params["height"], params["width"]),
                                   dtype=settings.precision)
 
-        # Kernel launch on chose stream
+        # Kernel launch on chosen stream
         self.kernel_func[self.blocks_per_grid, self.threads_per_block, s](
             self._cast(params["min_x"]), self._cast(params["max_x"]),
             self._cast(params["min_y"]), self._cast(params["max_y"]),

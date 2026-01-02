@@ -3,10 +3,10 @@ Benchmark the modular fractal renderer (CPU / CUDA / OpenCL).
 Supports full-frame and tile engines, perturbation, and f32/f64 precision.
 
 Usage examples:
-  python benchmark.py --backends cpu,cuda,opencl-h --res 800x600,1280x720 \
+  python benchmark.py --backend cpu,cuda,opencl-h --res 800x600,1280x720 \
       --precision f64 --max-iter 1000 --samples 2 --runs 5 --tile yes --tile-size 256x256
 
-  python benchmark.py --backends opencl-h --opencl-prefer-cpu yes --tile yes
+  python benchmark.py --backend opencl-h --opencl-prefer-cpu yes --tile yes
 
 Author: refactored for the new architecture
 """
@@ -21,17 +21,18 @@ from typing import List, Tuple, Optional
 import numpy as np
 
 # --- Architecture imports ----------------------------------------------------
-from fractals.fractal_base import Viewport, RenderSettings
+from fractals.base import Viewport, RenderSettings
 from fractals.mandelbrot import MandelbrotFractal
-from rendering.renderer_core import Renderer
-from rendering.render_engines import FullFrameEngine, TileEngine
+from rendering.core import Renderer
+from rendering.engines.tile import TileEngine
+from rendering.engines.full_frame import FullFrameEngine
 
-from backends.backend_base import Backend
-from backends.cpu_backend import CpuBackend
+from backend.model.base import Backend
+from backend.model.cpu import CpuBackend
 
 # CUDA (optional)
 try:
-    from backends.cuda_backend import CudaBackend
+    from backend.model.cuda import CudaBackend
     import numba.cuda as cuda
     CUDA_AVAILABLE = cuda.is_available()
 except Exception as e:
@@ -40,7 +41,7 @@ except Exception as e:
 
 # OpenCL hardened backend (robust on Windows drivers)
 try:
-    from backends.opencl_backend import OpenClBackend as OclBackend
+    from backend.model.opencl import OpenClBackend as OclBackend
     OCL_AVAILABLE = True
 except Exception as e:
     print(f"OpenCL not available: {e}")
@@ -212,7 +213,7 @@ def write_csv_row(writer: csv.writer,
 
 def main():
     p = argparse.ArgumentParser(description="Benchmark modular Mandelbrot renderer.")
-    p.add_argument("--backends", type=str, default="cpu,cuda,opencl-h",
+    p.add_argument("--backend", type=str, default="cpu,cuda,opencl-h",
                    help="Comma separated list: cpu,cuda,opencl or opencl-h (hardened)")
     p.add_argument("--res", type=str, default="800x600,1280x720,1920x1080",
                    help="Comma separated WxH list")
@@ -243,7 +244,7 @@ def main():
     print("Accel:", accel_info)
     print()
 
-    # Build backends
+    # Build backend
     backends: List[Tuple[str, Optional[Backend]]] = []
     for tag in backends_tags:
         try:

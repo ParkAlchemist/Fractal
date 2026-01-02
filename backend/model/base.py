@@ -1,13 +1,16 @@
 from abc import ABC, abstractmethod
 from typing import Dict, Any, Optional
 import numpy as np
-from fractals.fractal_base import Fractal, Viewport, RenderSettings
+from fractals.base import Fractal, Viewport, RenderSettings
 
 class Backend(ABC):
     """
-    An abstract base class for fractal rendering backends.
+    An abstract base class for fractal rendering backend.
     """
     name: str
+
+    @staticmethod
+    def enumerate_devices() -> list[dict]: ...
 
     @abstractmethod
     def compile(self, fractal: Fractal, settings: RenderSettings) -> None: ...
@@ -19,9 +22,6 @@ class Backend(ABC):
     @abstractmethod
     def close(self) -> None: ...
 
-    def render_async(self, fractal: Fractal, vp: Viewport, settings: RenderSettings,
-                     reference: Optional[Dict[str, Any]] = None) -> np.ndarray:
-        raise NotImplementedError("Backend does not support asynchronous rendering")
 
     def supports_async(self) -> bool:
         return hasattr(self, "render_async")

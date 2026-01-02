@@ -2,7 +2,7 @@ from dataclasses import dataclass
 from typing import Dict, Any, Optional
 import numpy as np
 
-from fractals.fractal_base import Fractal, Viewport, RenderSettings
+from fractals.base import Fractal, Viewport, RenderSettings
 from kernel_sources.cpu.mandelbrot import (mandelbrot_kernel_cpu_f32,
                                            mandelbrot_kernel_cpu_f64)
 from kernel_sources.cuda.mandelbrot import (mandelbrot_kernel_cuda_f32,

@@ -3,8 +3,8 @@ import time
 from dataclasses import dataclass
 from typing import Dict, Optional, Tuple, List
 
-from rendering.tilescorer import TileScorer
-from fractals.fractal_base import Viewport
+from rendering.scheduling.tilescorer import TileScorer
+from fractals.base import Viewport
 
 
 @dataclass

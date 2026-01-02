@@ -14,6 +14,7 @@ class ColoringMode(Enum):
 class EngineMode(Enum):
     FULL_FRAME = auto()
     TILED = auto()
+    ADAPTIVE = auto()
 
 class Tools(Enum):
     Drag = auto()

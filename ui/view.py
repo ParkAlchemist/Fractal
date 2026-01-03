@@ -98,7 +98,6 @@ class FractalViewer(QMainWindow):
         # Initial render
         self.apply_default_settings()
         self.api.set_view(self.state.center_x, self.state.center_y, self.state.zoom)
-        self._start_render()
 
     def _build_ui(self):
         # ----- Central layout -----
@@ -327,7 +326,7 @@ class FractalViewer(QMainWindow):
         inter = self._get_combo(self.inter_palette_input, 'Classic')
         self.api.set_palettes(exter, inter)
         self.log(f"Applied palettes: {exter} exterior, {inter} interior.")
-        self._start_render()
+        self.start_render()
 
     def apply_default_settings(self):
         (self.api.configure()
@@ -381,7 +380,7 @@ class FractalViewer(QMainWindow):
                 f"View updated: center=({self.state.center_x:.6g},{self.state.center_y:.6g}), "
                 f"zoom={self.state.zoom:.6g}, zoom_factor={self.state.zoom_factor:.3g}."
             )
-            self._start_render()
+            self.start_render()
         except ValueError as e:
             self.log(f"Error in view inputs: {e}")
 
@@ -431,7 +430,7 @@ class FractalViewer(QMainWindow):
          .backend(backend)
          .apply())
 
-        self._start_render()
+        self.start_render()
 
     def _apply_adaptive_settings(self):
         self.adaptive_opts["min_tile"] = self._get_int(self.min_tile_input, self.adaptive_opts["min_tile"])
@@ -445,7 +444,7 @@ class FractalViewer(QMainWindow):
         self.log(f"Adaptive settings applied: {self.adaptive_opts}")
 
     # ---------- Rendering control ----------
-    def _start_render(self):
+    def start_render(self):
         # Compute target render size based on preset & aspect
         render_w, render_h = self.rsize.compute_target_size(self.aspect_ratio)
         self.state.set_frame_size(render_w, render_h)
@@ -602,7 +601,7 @@ class FractalViewer(QMainWindow):
             # Commit the preview as the current view image
             self.view_image = self.display.pixmap().toImage().copy()
             self.compositor.view_image = self.view_image
-            self._start_render()
+            self.start_render()
 
     def update_view(self):
         if not getattr(self, "view_image", None):
@@ -662,7 +661,7 @@ class FractalViewer(QMainWindow):
 
             self.compositor.set_paused(False)
             self.compositor.flush()
-            self._start_render()
+            self.start_render()
 
             if self.final_render_pending:
                 self.final_render_pending = False
@@ -892,7 +891,7 @@ class FractalViewer(QMainWindow):
         if not hasattr(self, "resize_timer"):
             self.resize_timer = QTimer()
             self.resize_timer.setSingleShot(True)
-            self.resize_timer.timeout.connect(self._start_render)
+            self.resize_timer.timeout.connect(self.start_render)
         self.resize_timer.start(250)
 
     def closeEvent(self, event):

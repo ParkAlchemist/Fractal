@@ -142,7 +142,7 @@ class BackendManager:
     # --------------- Discovery ----------------------------
     def refresh_devices(self) -> None:
         """
-        Probes all known backend for devices.
+        Probes all known backends for devices.
         """
         devices: List[DeviceInfo] = []
         for name in self.preferred:

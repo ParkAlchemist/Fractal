@@ -16,4 +16,4 @@ class FullFrameEngine(BaseRenderEngine):
                cancel_cb: Optional[Callable[[], bool]] = None,
                backend: Optional[str] = None,
                device: Optional[int] = None) -> np.ndarray:
-        return manager.render_async(fractal, vp, settings, backend=backend, device=device).result()
+        return manager.render_async(fractal, vp, settings, backend=backend, device=device).result

@@ -31,9 +31,15 @@ from backend.model.cpu import CpuBackend
 
 
 class RenderService:
-    def __init__(self, width: int, height: int, palette,
-                 kernel: BackendType = BackendType.AUTO, max_iter: int = 200, samples: int = 2,
-                 coloring_mode: ColoringMode = ColoringMode.EXTERIOR, precision: np.dtype = np.float32
+    def __init__(self,
+                 width: int,
+                 height: int,
+                 palette,
+                 kernel: BackendType = BackendType.AUTO,
+                 max_iter: int = 200,
+                 samples: int = 2,
+                 coloring_mode: ColoringMode = ColoringMode.EXTERIOR,
+                 precision: np.dtype = np.float32
                  ) -> None:
         self.width = width
         self.height = height
@@ -93,7 +99,7 @@ class RenderService:
         elif precision == PrecisionMode.Single:
             self.precision = np.float32
         self.settings.precision = self.precision
-        self.renderer.settings = self.settings
+        self.renderer = Renderer(self.fractal, self.settings, engine=self.renderer.engine, manager=self.renderer.manager)
 
     def set_image_size(self, width: int, height: int) -> None:
         self.width, self.height = int(width), int(height)
@@ -101,14 +107,16 @@ class RenderService:
     def set_max_iter(self, new_max: int) -> None:
         self.max_iter = new_max
         self.settings.max_iter = new_max
-        self.renderer.settings = self.settings
+        self.renderer = Renderer(self.fractal, self.settings, engine=self.renderer.engine, manager=self.renderer.manager)
 
     def set_samples(self, new_samples: int) -> None:
         self.samples = new_samples
         self.settings.samples = new_samples
-        self.renderer.settings = self.settings
+        self.renderer = Renderer(self.fractal, self.settings, engine=self.renderer.engine, manager=self.renderer.manager)
 
-    def set_engine_mode(self, mode: EngineMode, adaptive_opts: Optional[Dict] = None,
+    def set_engine_mode(self,
+                        mode: EngineMode,
+                        adaptive_opts: Optional[Dict] = None,
                         tile_w: int | None = None,
                         tile_h: int | None = None) -> None:
         self.engine_mode = mode

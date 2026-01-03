@@ -50,7 +50,7 @@ class TileEngine(BaseRenderEngine):
         canvas = np.zeros((vp.height, vp.width), dtype=settings.precision)
         for x0, y0, sub_vp in self._tile_viewports(vp):
             if cancel_cb is not None and cancel_cb(): break
-            tile = manager.render(fractal, sub_vp, settings, backend=backend, device=device)
+            tile = manager.render_async(fractal, sub_vp, settings, backend=backend, device=device).result
             canvas[y0:y0+sub_vp.height, x0:x0+sub_vp.width] = tile
             if callable(self.on_tile):
                 self.on_tile(x0, y0, tile)

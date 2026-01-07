@@ -2,8 +2,8 @@ import numpy as np
 from typing import Dict, Any, Optional, Tuple, List
 from numba import cuda
 
-from fractals.base import Fractal, Viewport, RenderSettings
-from backend.model.base import Backend
+from fractals.base import Fractal, Viewport, RenderSettings, ProgramSpec
+from backend.model.be_base import Backend
 
 
 class CudaBackend(Backend):
@@ -21,7 +21,7 @@ class CudaBackend(Backend):
         self.streams = [cuda.stream() for _ in range(streams)] if streams > 0 else []
         self.threads_per_block = (16, 16)
         self.blocks_per_grid = None
-        self.kernel_func = None
+        self.program: Optional[ProgramSpec] = None
         self._cast = None
 
         # Warm up params
@@ -76,6 +76,7 @@ class CudaBackend(Backend):
                 })
         return devices
 
+    # ------ stream helpers ---------
     def _get_stream(self) -> Any:
         # Round-robin allocation
         if not self.streams:
@@ -84,42 +85,56 @@ class CudaBackend(Backend):
         self.streams.append(s)
         return s
 
+    # ------ compilation --------
     def compile(self, fractal: Fractal, settings: RenderSettings) -> None:
-
-        spec = fractal.get_backend_spec(settings, self.name)
-        self.kernel_func = spec["kernel_source"]
-        self._cast = spec["precision"]
+        """
+        Pull a generic program spec from the fractal and prepare warmup.
+        """
+        spec = fractal.get_program_spec(settings, self.name)
+        self.program = spec
+        self._cast = spec.precision
         self._warmup()
 
     def _warmup(self) -> None:
         """
         Used to warm up the backend with a small sample of the fractal to ensure the kernel is compiled by numba.
         """
-        if self._warmed_up: return
+        if self._warmed_up or self.program is None:
+            return
+
+        step = self.program.steps[0]
+
         self.blocks_per_grid = (
             (self._wu_width + self.threads_per_block[0] - 1) // self.threads_per_block[0],
             (self._wu_height + self.threads_per_block[1] - 1) // self.threads_per_block[1],
         )
 
         s = self._get_stream()
-
         d_out = cuda.device_array((self._wu_height, self._wu_width), dtype=self._cast)
-        self.kernel_func[self.blocks_per_grid, self.threads_per_block, s](
-            self._cast(self._wu_min_x), self._cast(self._wu_max_x),
-            self._cast(self._wu_min_y), self._cast(self._wu_max_y),
-            d_out, self._cast(self._wu_max_iter), self._cast(self._wu_samples)
-        )
 
+        arg_map = {
+            "min_x": self._cast(self._wu_min_x),
+            "max_x": self._cast(self._wu_max_x),
+            "min_y": self._cast(self._wu_min_y),
+            "max_y": self._cast(self._wu_max_y),
+            "out": d_out,
+            "max_iter": self._cast(self._wu_max_iter),
+            "samples": self._cast(self._wu_samples),
+        }
+        ordered = [arg_map[name] for name in step.args]
+
+        step.func[self.blocks_per_grid, self.threads_per_block, s](*ordered)
         s.synchronize()
         self._warmed_up = True
 
+    # ------- rendering --------
     def render_async(self,
                      fractal: Fractal,
                      vp: Viewport,
                      settings: RenderSettings,
                      reference: Optional[Dict[str, Any]] = None,
                      stream: Optional[cuda.stream] = None,
-                     ) -> Tuple[np.ndarray, cuda.event]:
+                     ) -> Tuple[np.ndarray, Any]:
         """
         Asynchronous rendering.
         - Allocates device output
@@ -128,61 +143,92 @@ class CudaBackend(Backend):
         - Returns (host_array_view, completion_event)
         """
 
-        if self.kernel_func is None:
+        if self.program is None:
             raise RuntimeError("Backend has not been compiled yet")
 
-        params = fractal.get_backend_params(vp, settings)
-
+        # Compute launch dims
         self.blocks_per_grid = (
-            (params["width"] + self.threads_per_block[0] - 1) // self.threads_per_block[0],
-            (params["height"] + self.threads_per_block[1] - 1) // self.threads_per_block[1],
+            (vp.width + self.threads_per_block[0] - 1) // self.threads_per_block[0],
+            (vp.height + self.threads_per_block[1] - 1) // self.threads_per_block[1],
         )
-
         s = stream or self._get_stream()
 
-        # Device output
-        d_out = cuda.device_array((params["height"], params["width"]),
-                                  dtype=settings.precision)
+        # Prepare scalars
+        scalars = fractal.build_arg_values(vp, settings)
 
-        # Kernel launch on chosen stream
-        self.kernel_func[self.blocks_per_grid, self.threads_per_block, s](
-            self._cast(params["min_x"]), self._cast(params["max_x"]),
-            self._cast(params["min_y"]), self._cast(params["max_y"]),
-            d_out, self._cast(params["max_iter"]), self._cast(params["samples"])
-        )
+        # Allocate buffers
+        H, W = vp.height, vp.width
+        out_dev = cuda.device_array((H, W), dtype=self.program.precision)
+        out_host = cuda.pinned_array(shape=(H, W), dtype=self.program.precision)
 
-        # Pinned host buffer for async copy
-        h_out = cuda.pinned_array(shape=(params["height"], params["width"]),
-                                  dtype=settings.precision)
+        # Build arg map
+        arg_map: Dict[str, Any] = {}
+        for name, spec in self.program.args.items():
+            if spec.role == "buffer_out":
+                arg_map[name] = out_dev
+            elif spec.role == "scalar":
+                val = scalars.get(name)
 
-        # Async copy to host in the same stream
-        d_out.copy_to_host(h_out, stream=s)
+                if val is None and reference is not None:
+                    val = reference.get(name)
+                if val is None:
+                    raise KeyError(
+                        f"Missing scalar value for '{name}' - "
+                        f"ensure fractal.build_arg_values() provides it."
+                    )
 
-        # Create an event and record it after copy
+                # cast to the required dtype
+                if spec.dtype in (np.float32, np.float64):
+                    val = spec.dtype(val)
+                elif spec.dtype in (np.int32, np.int64):
+                    val = spec.dtype(val)
+
+                arg_map[name] = val
+            else:
+                arg_map[name] = scalars.get(name)
+
+        # ordered args for the kernel
+        step = self.program.steps[0]
+        ordered = [arg_map[name] for name in step.args]
+
+        # Launch kernel
+        step.func[self.blocks_per_grid, self.threads_per_block, s](*ordered)
+
+        # Async copy device -> host
+        out_dev.copy_to_host(out_host, stream=s)
         done_evt = cuda.event(timing=False)
         done_evt.record(stream=s)
 
-        return h_out, done_evt
+        return out_host, done_evt
 
     def render(self, fractal: Fractal, vp: Viewport, settings: RenderSettings,
                reference: Optional[Dict[str, Any]] = None) -> np.ndarray:
         """
         Synchronous rendering.
         """
-        h_out, evt = self.render_async(fractal, vp, settings, reference)
+        out, evt = self.render_async(fractal, vp, settings, reference)
         evt.synchronize()
-        return h_out
+        return out
 
     def close(self) -> None:
         if self.streams:
             for s in self.streams:
                 try:
-                    s.close()
+                    s.synchronize()
                 except Exception as e:
                     print(f"Error in closing stream: {e}")
                     pass
             self.streams.clear()
-            self.streams = None
-
-        self.kernel_func = None
+        self.streams = None
+        self.program = None
         self._cast = None
+
+
+if __name__ == "__main__":
+    with CudaBackend() as be:
+        devs = be.enumerate_devices()
+        if len(devs) == 0:
+            raise RuntimeError("No devices found.")
+        print("Available devices:")
+        for i, d in enumerate(devs):
+            print(f"{i}: {d}")

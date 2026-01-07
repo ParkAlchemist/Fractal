@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List, Literal
 import numpy as np
 from abc import ABC, abstractmethod
 
@@ -32,6 +32,56 @@ class RenderSettings:
     base_res: str = None
     target_res: str = None
 
+
+# --------------- Program-spec primitives ----------------------
+
+ArgRole = Literal["scalar", "buffer_out", "buffer_in"]
+ArgSource = Literal["viewport", "settings", "constant", "runtime"]
+
+@dataclass(frozen=True)
+class ArgSpec:
+    """
+    Describes a kernel argument.
+    - role: semantic role
+    - dtype: dtype to cast to
+    - shape_expr: textual expression for shapes (e.g. "H,W") for buffers
+    - source: where the value comes from (viewport, settings, constant, runtime)
+    """
+    name: str
+    role: ArgRole
+    dtype: Any
+    shape_expr: Optional[str] = None
+    source: ArgSource = "runtime"
+
+@dataclass(frozen=True)
+class KernelStep:
+    """
+    A single kernel launch:
+    - func: the kernel function / program object
+    - args: ordered list of ArgSpec names for this kernel
+    - meta: optional launch metadata
+    """
+    name: str
+    func: Any
+    args: List[str]
+    meta: Optional[Dict[str, Any]]
+
+@dataclass(frozen=True)
+class ProgramSpec:
+    """
+    Full program for a backend:
+    - backend: backend name
+    - precision: data type for calculations (e.g., np.float32)
+    - args: dict of ArgSpec (by name)
+    - steps: list of KernelStep (execution order)
+    - output_arg: name of the buffer that holds the final result
+    """
+    backend: str
+    precision: Any
+    args: Dict[str, ArgSpec]
+    steps: List[KernelStep]
+    output_arg: str
+
 class Fractal(ABC):
     """
     An abstract base class for fractal types.
@@ -39,14 +89,13 @@ class Fractal(ABC):
     name: str
 
     @abstractmethod
-    def get_backend_params(self, viewport: Viewport,
-                           settings: RenderSettings) -> Optional[Dict[str, Any]]:
+    def build_arg_values(self, vp: Viewport, st: RenderSettings) -> Dict[str, Any]:
         ...
 
     @abstractmethod
-    def get_backend_spec(self, settings: RenderSettings,
-                         backend_name: str) -> Optional[Dict[str, Any]]:
+    def get_program_spec(self, st: RenderSettings, backend_name: str) -> ProgramSpec:
         ...
 
     @abstractmethod
-    def output_semantics(self) -> str: ...
+    def output_semantics(self) -> str:
+        ...

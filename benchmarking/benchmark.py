@@ -27,12 +27,12 @@ from rendering.core import Renderer
 from rendering.engines.tile import TileEngine
 from rendering.engines.full_frame import FullFrameEngine
 
-from backend.model.base import Backend
-from backend.model.cpu import CpuBackend
+from backend.model.be_base import Backend
+from backend.model.be_cpu import CpuBackend
 
 # CUDA (optional)
 try:
-    from backend.model.cuda import CudaBackend
+    from backend.model.be_cuda import CudaBackend
     import numba.cuda as cuda
     CUDA_AVAILABLE = cuda.is_available()
 except Exception as e:
@@ -41,7 +41,7 @@ except Exception as e:
 
 # OpenCL hardened backend (robust on Windows drivers)
 try:
-    from backend.model.opencl import OpenClBackend as OclBackend
+    from backend.model.be_opencl import OpenClBackend as OclBackend
     OCL_AVAILABLE = True
 except Exception as e:
     print(f"OpenCL not available: {e}")

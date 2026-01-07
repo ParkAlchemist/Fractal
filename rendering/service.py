@@ -24,10 +24,10 @@ from utils.enums import EngineMode, ColoringMode, PrecisionMode, BackendType
 from utils.backend_helpers import available_backends
 
 # Backend imports
-from backend.model.base import Backend
-from backend.model.opencl import OpenClBackend
-from backend.model.cuda import CudaBackend
-from backend.model.cpu import CpuBackend
+from backend.model.be_base import Backend
+from backend.model.be_opencl import OpenClBackend
+from backend.model.be_cuda import CudaBackend
+from backend.model.be_cpu import CpuBackend
 
 
 class RenderService:

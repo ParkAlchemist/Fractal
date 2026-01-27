@@ -38,7 +38,7 @@ class FractalViewer(QMainWindow):
                                aspect_ratio=self.aspect_ratio, zoom_factor=2.0)
 
         # Render policy (target size / lod)
-        self.rsize = RenderSizePolicy(pitch_multiple=32)
+        self.rsize = RenderSizePolicy(pitch_multiple=1)
         self.rsize.target_quality = "1080p"
 
         # Images
@@ -329,8 +329,10 @@ class FractalViewer(QMainWindow):
         self.start_render()
 
     def apply_default_settings(self):
+        w, h = self.rsize.compute_target_size(self.state.aspect_ratio)
+        res = str(f"{w}x{h}")
         (self.api.configure()
-         .resolution(self.rsize.target_quality)
+         .resolution(res)
          .max_iter(int(self._get_combo(self.iter_input, 200)))
          .samples(int(self._get_combo(self.samples_input, 2)))
          .engine_mode(EngineMode.FULL_FRAME)
@@ -396,7 +398,8 @@ class FractalViewer(QMainWindow):
             self.log(f"Resolution preset changed to {self.rsize.target_quality}.")
             self.state.set_frame_size(new_w, new_h)
 
-        resolution = self._get_combo(self.res_input, '1080p')
+        resolution = str(f"{new_w}x{new_h}")
+        print(resolution)
         max_iter = int(self._get_combo(self.iter_input, 200))
         samples = int(self._get_combo(self.samples_input, 2))
 

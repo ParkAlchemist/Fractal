@@ -1,13 +1,16 @@
 import numpy as np
-from typing import Dict, Any, Optional, List, Tuple
+from typing import Dict, Any, Optional, Tuple
 
-from fractals.base import Fractal, Viewport, RenderSettings, ProgramSpec, KernelStep, ArgSpec
+from fractals.base import Fractal, Viewport, RenderSettings, ProgramSpec, ArgSpec
+from fractals.spec_validator import validate_program_spec
 from backend.model.be_base import Backend
+from utils.shape_helper import eval_shape_expr, ShapeExprError
 
 
 class CpuEvent:
     """A minimal event-like object to mirror async interfaces (no-op)."""
-    def wait(self) -> None:
+    @staticmethod
+    def wait() -> None:
         return None
 
 
@@ -28,26 +31,13 @@ class CpuBackend(Backend):
         self._wu_bounds = (-2.0, 1.0, -1.5, 1.5)
         self._wu_max_iter, self._wu_samples = 64, 1
 
-
-    @staticmethod
-    def enumerate_devices() -> List[dict]:
-        return [{
-            "device_id": None,
-            "name": "CPU",
-            "vendor": None,
-            "driver": None,
-            "compute_capability": None,
-            "memory_total_mb": None,
-            "memory_free_mb": None,
-            "is_available": True
-        }]
-
     def compile(self, fractal: Fractal, settings: RenderSettings) -> None:
         """
         Pull the generic ProgramSpec from the fractal for the backend.
         Expects KernelStep.func to be a Python callable (Numba njit or pure Python).
         """
         spec = fractal.get_program_spec(settings, self.name)
+        validate_program_spec(spec, backend_hint=self.name)
         self.program_spec = spec
         self._precision_cast = spec.precision
         self._fractal = fractal
@@ -102,6 +92,7 @@ class CpuBackend(Backend):
         for step in self.program_spec.steps:
             ordered = [arg_map[name] for name in step.args]
             last_result = step.func(*ordered)
+
             # If the CPU kernel returns an array, allow it to override the out buffer
             if last_result is not None and self.program_spec.output_arg in self.program_spec.args:
                 out_arg = self.program_spec.output_arg
@@ -109,12 +100,10 @@ class CpuBackend(Backend):
                     # Replace mapped buffer with returned one
                     arg_map[out_arg] = last_result
                     out_arr = last_result
-
         if out_arr is None:
             # If nothing was produced, return a zero array to avoid None
             out_arr = np.zeros((vp.height, vp.width),
                                dtype=self.program_spec.precision)
-
         return out_arr, CpuEvent()
 
     def render(
@@ -138,36 +127,62 @@ class CpuBackend(Backend):
         """
         Build a dict name->value for function call.
         Returns (arg_map, out_array_view, tmp_host) where out_array_view is the final
-        output buffer (NumPy ndarray) if a 'buffer_out' matches output_arg; tmp_host is
-        kept for parity with GPU backends (unused here).
+        output buffer (NumPy ndarray) if a 'buffer_out' matches output_arg.
         """
         H, W = int(vp.height), int(vp.width)
         arg_map: Dict[str, Any] = {}
         out_arr: Optional[np.ndarray] = None
 
+        # Vars for shape expressions
+        S = int(scalars.get("ssaa", 1))
+        base_vars = {
+            "H": H, "W": W, "width": W, "height": H,
+            "S": S,
+            "C": int(scalars.get("channels", 3)),  # default 3 for rgb
+            "N": int(scalars.get("N", scalars.get("palette_ex_len",scalars.get("palette_len",0)))),
+            "M": int(scalars.get("M", scalars.get("palette_in_len",scalars.get("palette_len",0)))),
+        }
+
         for name, spec in args_spec.items():
             if spec.role == "buffer_out":
-                # Allocate a NumPy array for output
                 np_dt = np.dtype(spec.dtype)
-                arr = np.empty((H, W), dtype=np_dt)
+                # special-case rgb default channels if not provided
+                if name.lower() == "rgb" and "channels" not in scalars:
+                    base_vars["C"] = 3
+                shape = (H, W)
+                if spec.shape_expr:
+                    try:
+                        shape = eval_shape_expr(spec.shape_expr, base_vars)
+                    except ShapeExprError as e:
+                        raise KeyError(f"Failed to allocate '{name}': {e}")
+                arr = np.zeros(shape, dtype=np_dt)
                 arg_map[name] = arr
-
                 if name == getattr(self.program_spec, "output_arg", name):
                     out_arr = arr
 
             elif spec.role == "buffer_in":
-                # Future: accept a precomputed NumPy array from scalars or reference
-                # For now, keep this simple and raise if it's missing.
-                raise NotImplementedError(
-                    "buffer_in not yet provided on CPU path")
+                if name not in scalars:
+                    raise KeyError(
+                        f"buffer_in '{name}' not provided in scalars.")
+                arr = np.asarray(scalars[name])
+                if spec.shape_expr:
+                    try:
+                        exp_shape = eval_shape_expr(spec.shape_expr, base_vars)
+                        if tuple(arr.shape) != tuple(exp_shape):
+                            raise ValueError(
+                                f"'{name}' expected shape {exp_shape}, got {arr.shape}.")
+                    except ShapeExprError:
+                        pass
+                if arr.dtype != np.dtype(spec.dtype):
+                    arr = arr.astype(spec.dtype, copy=False)
+                arg_map[name] = arr
 
             elif spec.role == "scalar":
-                # scalars from viewport/settings, cast to dtype
                 if name in scalars:
                     val = scalars[name]
                 else:
                     raise KeyError(
-                        f"Missing scalar value for '{name}' - "
+                        f"Missing scalar value for '{name}' – "
                         f"ensure fractal.build_arg_values() provides it."
                     )
                 np_dt = np.dtype(spec.dtype)
@@ -176,6 +191,7 @@ class CpuBackend(Backend):
                 else:
                     val = np_dt.type(float(val))
                 arg_map[name] = val
+
             else:
                 raise ValueError(
                     f"Unknown ArgSpec.role for '{name}': {spec.role}")

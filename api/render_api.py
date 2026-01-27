@@ -48,8 +48,8 @@ class RenderConfigBuilder:
     def apply(self):
         # Apply settings to the service
         if self._resolution:
-            w, h = self._compute_size(self._resolution)
-            self.service.set_image_size(w, h)
+            w, h = self._resolution.split('x')
+            self.service.set_image_size(int(w), int(h))
         if self._max_iter:
             self.service.set_max_iter(self._max_iter)
         if self._samples:
@@ -57,22 +57,7 @@ class RenderConfigBuilder:
         if self._engine_mode:
             self.service.set_engine_mode(self._engine_mode, self._adaptive_opts, self._tile_w, self._tile_h)
         if self._backend:
-            #self.renderer.set_kernel(self._backend)
-            pass
-
-    @staticmethod
-    def _compute_size(preset: str) -> tuple[int, int]:
-        mapping = {
-            "2160p": 3840,
-            "1440p": 2560,
-            "1080p": 1920,
-            "720p": 1280,
-            "480p": 854,
-            "360p": 640,
-        }
-        h = int(preset.replace("p", ""))
-        w = mapping.get(preset, 1920)
-        return w, h
+            self.service.set_kernel(self._backend)
 
 
 class RenderAPI:

@@ -3,28 +3,40 @@ from typing import Dict, Any, Optional
 import numpy as np
 from fractals.base import Fractal, Viewport, RenderSettings
 
+
 class Backend(ABC):
     """
-    An abstract base class for fractal rendering backend.
+    A base class for fractal rendering backend.
     """
     name: str
 
-    @staticmethod
-    def enumerate_devices() -> list[dict]: ...
+    @abstractmethod
+    def compile(self,
+                fractal: Fractal,
+                settings: RenderSettings
+                ) -> None:
+        ...
 
     @abstractmethod
-    def compile(self, fractal: Fractal, settings: RenderSettings) -> None: ...
+    def render_async(self, fractal: Fractal,
+                     vp: Viewport,
+                     settings: RenderSettings,
+                     reference: Optional[Dict[str, Any]] = None
+                     ) -> tuple[np.ndarray, Any]:
+        ...
 
     @abstractmethod
-    def render(self, fractal: Fractal, vp: Viewport, settings: RenderSettings,
-               reference: Optional[Dict[str, Any]] = None) -> np.ndarray: ...
+    def render(self,
+               fractal: Fractal,
+               vp: Viewport,
+               settings: RenderSettings,
+               reference: Optional[Dict[str, Any]] = None
+               ) -> np.ndarray:
+        ...
 
     @abstractmethod
-    def close(self) -> None: ...
-
-
-    def supports_async(self) -> bool:
-        return hasattr(self, "render_async")
+    def close(self) -> None:
+        ...
 
     def __enter__(self):
         return self

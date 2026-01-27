@@ -2,6 +2,7 @@ import math
 from dataclasses import dataclass
 from typing import Dict, Tuple
 
+
 @dataclass
 class Weights:
     """
@@ -14,6 +15,7 @@ class Weights:
     age: float
     var: float
     bnd: float
+
 
 class TileScorer:
     """
@@ -36,7 +38,8 @@ class TileScorer:
     @staticmethod
     def _vis(x0: int, y0: int, w: int, h: int,
              frame_width: int, frame_height: int) -> float:
-        return 1.0 if (x0 < frame_width and y0 < frame_height and w > 0 and h > 0) else 0.0
+        return 1.0 if (
+                    x0 < frame_width and y0 < frame_height and w > 0 and h > 0) else 0.0
 
     @staticmethod
     def _center_proximity(x0: int, y0: int, w: int, h: int, frame_width: int,
@@ -101,15 +104,18 @@ class TileScorer:
         weights = self._wm if is_moving else self._wi
 
         return (
-            weights.vis * self._vis(x0, y0, w, h, frame_width, frame_height) +
-            weights.center * self._center_proximity(x0, y0, w, h,
-                                                    frame_width, frame_height) +
-            weights.area * self._area_on_screen(w, h, frame_width, frame_height) +
-            weights.motion * self._motion_ahead(x0, y0, w, h,
-                                                frame_width, frame_height,
-                                                motion_x_px, motion_y_px) +
-            weights.age * self._age(enqueue_time, now) +
-            weights.var * self._var_norm(iteration_variance) +
-            weights.bnd * self._bnd_norm(boundary_likelihood) +
-            self._seam_norm(neighbors_rendered)
+                weights.vis * self._vis(x0, y0, w, h, frame_width,
+                                        frame_height) +
+                weights.center * self._center_proximity(x0, y0, w, h,
+                                                        frame_width,
+                                                        frame_height) +
+                weights.area * self._area_on_screen(w, h, frame_width,
+                                                    frame_height) +
+                weights.motion * self._motion_ahead(x0, y0, w, h,
+                                                    frame_width, frame_height,
+                                                    motion_x_px, motion_y_px) +
+                weights.age * self._age(enqueue_time, now) +
+                weights.var * self._var_norm(iteration_variance) +
+                weights.bnd * self._bnd_norm(boundary_likelihood) +
+                self._seam_norm(neighbors_rendered)
         )

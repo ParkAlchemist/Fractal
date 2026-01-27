@@ -36,10 +36,12 @@ class DeviceInfo:
     is_available: bool = True
     extra: Dict[str, object] = field(default_factory=dict)
 
+
 class RenderHandle:
     """
     Wrapper for asynchronous rendering results, providing a wait method to block until the result is available.
     """
+
     def __init__(self, result, wait_fn):
         self._result = result
         self._wait_fn = wait_fn
@@ -55,11 +57,14 @@ class RenderHandle:
     def result(self):
         return self.wait()
 
+
 class MultiRenderHandle:
     """
     Aggregates several RenderHandle objects and an aggregator function.
     """
-    def __init__(self, handles: List[RenderHandle], agg_fn: Callable[[List], np.ndarray]):
+
+    def __init__(self, handles: List[RenderHandle],
+                 agg_fn: Callable[[List], np.ndarray]):
         self._handles = handles
         self._agg_fn = agg_fn
         self._waited = False
@@ -104,6 +109,7 @@ BACKENDS = {
     ),
 }
 
+
 #---------------------------------------------------------------------
 # BackendManager: device management + (multi-)render orchestration
 # --------------------------------------------------------------------
@@ -116,13 +122,21 @@ class BackendManager:
         - Single- and multi-device rendering orchestration
         - Fallbacks and lifecycle
     """
+
     def __init__(self,
-                 preferred: list[str] = BACKENDS.keys(),
+                 preferred: Optional[list[str], str] = None,
                  allow_fallback: bool = True,
                  memory_budget_fraction: float = 0.90,
-                 selection_policy: str = "AUTO",    # "AUTO" | "THROUGHPUT" | "LATENCY" | "MEMORY"
+                 selection_policy: str = "AUTO",
+                 # "AUTO" | "THROUGHPUT" | "LATENCY" | "MEMORY"
                  telemetry: Optional[Callable[[str], None]] = None):
-        self.preferred = list(preferred)
+        if preferred is None:
+            pref = list(BACKENDS.keys())
+        elif isinstance(preferred, str):
+            pref = [preferred]
+        else:
+            pref = preferred
+        self.preferred: list[str] = pref
         self.allow_fallback = bool(allow_fallback)
         self.memory_budget_fraction = float(memory_budget_fraction)
         self.selection_policy = selection_policy
@@ -134,6 +148,8 @@ class BackendManager:
         # Global compile state (fractal, settings) to apply on creation or on refresh
         self._compiled = False
         self._compile_args: Optional[Tuple[Fractal, RenderSettings]] = None
+
+        self._perf_cache: Dict[Tuple[str, Optional[int]], float] = {}
 
         # Device inventory
         self._devices: List[DeviceInfo] = []
@@ -150,7 +166,8 @@ class BackendManager:
                 continue
             spec = BACKENDS[name]
             try:
-                if spec.supports_devices and hasattr(spec.cls, "enumerate_devices"):
+                if spec.supports_devices and hasattr(spec.cls,
+                                                     "enumerate_devices"):
                     raw = spec.cls.enumerate_devices()
                     for r in raw:
                         if isinstance(r, DeviceInfo):
@@ -159,54 +176,134 @@ class BackendManager:
                             di = DeviceInfo(backend=name, **r)
                         devices.append(di)
                 else:
-                    devices.append(DeviceInfo(backend="CPU", device_id=None, name="CPU"))
+                    devices.append(
+                        DeviceInfo(backend=name, device_id=None, name=name))
             except Exception as e:
-                self.log(f"[BackendManager] Device probe failed for {name}: {e}")
+                self.log(
+                    f"[BackendManager] Device probe failed for {name}: {e}")
         self._devices = self._score_devices(devices, self.selection_policy)
 
     def list_devices(self, backend: Optional[str] = None) -> List[DeviceInfo]:
         if backend:
-            return [d for d in self._devices if d.backend.upper() == backend.upper()]
+            return [d for d in self._devices if
+                    d.backend.upper() == backend.upper()]
         return list(self._devices)
 
     # --------------- Selection ----------------------------
     @staticmethod
-    def _score_devices(devices: List[DeviceInfo], policy: str) -> List[DeviceInfo]:
-        def base_score(d: DeviceInfo) -> float:
-            # Priority by backend kind
-            prio = BACKENDS.get(d.backend.upper(), BackendSpec(Backend, -1, False)).priority
-            mem = (d.memory_total_mb or 0) / 1024.0
-            cap = 0.0
+    def _normalize_list(values: List[float]) -> List[float]:
+        if not values:
+            return []
+        mn, mx = min(values), max(values)
+        if mx <= mn:
+            return [0.5 for _ in values]
+        rng = mx - mn
+        return [(v - mn) / rng for v in values]
+
+    def _score_devices(self,
+                       devices: List[DeviceInfo],
+                       policy: str,
+                       weights_override: Optional[Dict[str, float]] = None
+                       ) -> List[DeviceInfo]:
+        """
+        Compute a weighted, normalized score for devices.
+
+        Metrics considered (if present):
+          - backend priority (from BACKENDS)
+          - memory_total_mb
+          - compute_capability (parsed float if possible)
+          - runtime perf (from self._perf_cache, e.g. measured TFLOPS or frames/s)
+          - extras: cores, clock_mhz, fp_perf (optional fields in DeviceInfo.extra)
+
+        `policy` chooses a preset of weights; `weights_override` can override specific keys.
+        """
+        if not devices:
+            return []
+
+        # Gather raw metrics
+        mems = []
+        computes = []
+        cores = []
+        clocks = []
+        perfs = []
+        backend_prios = []
+
+        for d in devices:
+            mems.append(float(d.memory_total_mb or 0))
+            # Compute capability as float
+            cc = 0.0
             try:
-                cap = float(d.compute_capability) if d.compute_capability else 0.0
-            except Exception:
-                pass
-            return prio * 10.0 + mem + cap
+                cc = float(d.compute_capability) if d.compute_capability else 0.0
+            except Exception as e:
+                try:
+                    import re
+                    m = re.search(r"(\d+\.\d+)", str(d.compute_capability))
+                    if m:
+                        cc = float(m.group(1))
+                except Exception as e:
+                    cc = 0.0
+            computes.append(cc)
+            cores.append(float(d.extra.get("cores", 0)))
+            clocks.append(float(d.extra.get("clock_mhz", 0)))
+            perfs.append(float(self._perf_cache.get((d.backend, d.device_id), 0.0)))
+            prio = BACKENDS.get(d.backend.upper(),
+                                BackendSpec(cls=Backend,
+                                            priority=-1,
+                                            supports_devices=False)).priority
+            backend_prios.append(float(prio))
 
-        def throughput_score(d: DeviceInfo) -> float:
-            return base_score(d)
+        # Normalize metrics
+        n_mem = self._normalize_list(mems)
+        n_comp = self._normalize_list(computes)
+        n_cores = self._normalize_list(cores)
+        n_clocks = self._normalize_list(clocks)
+        n_perfs = self._normalize_list(perfs)
+        n_prio = self._normalize_list(backend_prios)
 
-        def latency_score(d: DeviceInfo) -> float:
-            if d.backend.upper() == "CPU":
-                return base_score(d) + 1.0
-            return base_score(d) - 0.1
+        # Policy presets (weights sum to 1.0)
+        presets = {
+            "AUTO": {"prio": 0.35, "memory": 0.20, "compute": 0.30, "perf": 0.15},
+            "THROUGHPUT": {"prio": 0.15, "memory": 0.15, "compute": 0.30, "perf": 0.40},
+            "LATENCY": {"prio": 0.25, "memory": 0.10, "compute": 0.35, "perf": 0.30},
+            "MEMORY": {"prio": 0.10, "memory": 0.70, "compute": 0.10, "perf": 0.10},
+        }
+        base_weights = presets.get(policy, presets["AUTO"]).copy()
+        if weights_override:
+            base_weights.update(weights_override)
 
-        def memory_score(d: DeviceInfo) -> float:
-            return d.memory_total_mb or 0
+        # Small vendor/backend boosts
+        def vendor_boost(di: DeviceInfo) -> float:
+            v = (di.vendor or "").lower()
+            if "nvidia" in v:
+                return 1.05
+            if "amd" in v or "radeon" in v:
+                return 1.03
+            if "intel" in v:
+                return 1.01
+            return 1.0
 
         scored: List[DeviceInfo] = []
-        for d in devices:
+        for i, d in enumerate(devices):
             if not d.is_available:
                 continue
-            if policy == "THROUGHPUT":
-                s = throughput_score(d)
-            elif policy == "LATENCY":
-                s = latency_score(d)
-            elif policy == "MEMORY":
-                s = memory_score(d)
-            else:
-                s = base_score(d)
-            scored.append(DeviceInfo(**{**d.__dict__, "score": s}))
+
+            # Wweighted sum of normalized metrics
+            s = 0.0
+            s += base_weights.get("prio", 0.0) * n_prio[i]
+            s += base_weights.get("memory", 0.0) * n_mem[i]
+            s += base_weights.get("compute", 0.0) * n_comp[i]
+
+            aux = 0.0
+            aux += 0.5 * n_cores[i]
+            aux += 0.5 * n_clocks[i]
+            s += 0.05 * aux
+
+            s += base_weights.get("perf", 0.0) * n_perfs[i]
+
+            s *= vendor_boost(d)
+
+            scored.append(DeviceInfo(**{**d.__dict__, "score": float(s)}))
+
         scored.sort(key=lambda x: x.score, reverse=True)
         return scored
 
@@ -221,7 +318,8 @@ class BackendManager:
         """
         policy = policy or self.selection_policy
         if backend is not None:
-            devs = [d for d in self._devices if d.backend.upper() == backend.upper()]
+            devs = [d for d in self._devices if
+                    d.backend.upper() == backend.upper()]
         else:
             devs = list(self._devices)
 
@@ -234,10 +332,12 @@ class BackendManager:
             for d in devs:
                 if d.device_id == device:
                     return d
-            raise RuntimeError(f"No device {device} for backend {backend or '*'}")
+            raise RuntimeError(
+                f"No device {device} for backend {backend or '*'}")
 
         if not devs:
-            raise RuntimeError(f"No devices available for the requested criteria.")
+            raise RuntimeError(
+                f"No devices available for the requested criteria.")
 
         if policy != self.selection_policy:
             devs = self._score_devices(devs, policy)
@@ -249,15 +349,23 @@ class BackendManager:
         """
         Retrieves a backend instance for the given name and device.
         """
-        key = (name.upper(), device if BACKENDS[name.upper()].supports_devices else None)
+        try:
+            key = (name.upper(),
+                   device if BACKENDS[name.upper()].supports_devices else None)
+        except KeyError:
+            raise RuntimeError(f"Unknown backend: {name}")
+
         if key in self._backends:
             return self._backends[key]
+
         spec = BACKENDS[name]
         b = spec.cls(device=device) if spec.supports_devices else spec.cls()
+
         if self._compiled and self._compile_args:
             fractal, settings = self._compile_args
             b.compile(fractal, settings)
         self._backends[key] = b
+
         return b
 
     def compile(self, fractal: Fractal, settings: RenderSettings) -> None:
@@ -272,10 +380,12 @@ class BackendManager:
             try:
                 be.compile(fractal, settings)
             except Exception as e:
-                self.log(f"[BackendManager] Compilation failed for cached backend {be.name}: {e}")
+                self.log(
+                    f"[BackendManager] Compilation failed for cached backend {be.name}: {e}")
 
     # -------------------- Single device rendering --------------------
-    def _select_backend(self, backend: Optional[str], device: Optional[int]) -> Tuple[str, Optional[int]]:
+    def _select_backend(self, backend: Optional[str], device: Optional[int]) -> \
+    Tuple[str, Optional[int]]:
         """
         Selects and returns a backend instance based on the provided backend and device.
         """
@@ -292,7 +402,8 @@ class BackendManager:
                 last_error = e
                 if not self.allow_fallback:
                     raise
-        raise RuntimeError(f"No suitable backend found. Last error: {last_error}")
+        raise RuntimeError(
+            f"No suitable backend found. Last error: {last_error}")
 
     def render(
             self,
@@ -342,7 +453,8 @@ class BackendManager:
 
     # ---------------- -- Multi-device rendering ----------------------
     @staticmethod
-    def _split_viewport_stripes(vp: Viewport, parts: int, axis: str = "y") -> List[Tuple[Viewport, slice]]:
+    def _split_viewport_stripes(vp: Viewport, parts: int, axis: str = "y") -> \
+    List[Tuple[Viewport, slice]]:
         """
         Splits a viewport into 'parts' equally (last gets the remainder).
         Returns sub-viewports and target slices for assembling.
@@ -358,7 +470,8 @@ class BackendManager:
                 sy, ey = off / vp.height, (off + h) / vp.height
                 sub_min_y = vp.min_y + (vp.max_y - vp.min_y) * sy
                 sub_max_y = vp.min_y + (vp.max_y - vp.min_y) * ey
-                svp = Viewport(vp.min_x, vp.max_x, sub_min_y, sub_max_y, vp.width, h)
+                svp = Viewport(vp.min_x, vp.max_x, sub_min_y, sub_max_y,
+                               vp.width, h)
                 subs.append((svp, slice(off, off + h)))
                 off += h
         else:
@@ -371,7 +484,8 @@ class BackendManager:
                 sx, ex = off / vp.width, (off + w) / vp.width
                 sub_min_x = vp.min_x + (vp.max_x - vp.min_x) * sx
                 sub_max_x = vp.min_x + (vp.max_x - vp.min_x) * ex
-                svp = Viewport(sub_min_x, sub_max_x, vp.min_y, vp.max_y, w, vp.height)
+                svp = Viewport(sub_min_x, sub_max_x, vp.min_y, vp.max_y, w,
+                               vp.height)
                 subs.append((svp, slice(off, off + w)))
                 off += w
         return subs
@@ -392,7 +506,8 @@ class BackendManager:
         if backend is None:
             chosen = self.choose_device()
             backend = chosen.backend
-        devs = [d for d in self._devices if d.backend.upper() == backend.upper()]
+        devs = [d for d in self._devices if
+                d.backend.upper() == backend.upper()]
 
         if not devs:
             raise RuntimeError(f"No devices found for backend {backend}.")
@@ -400,14 +515,15 @@ class BackendManager:
         if devices is not None:
             devs = [d for d in devs if d.device_id in set(devices)]
             if not devs:
-                raise RuntimeError(f"No matching device ids {devices} for backend {backend}.")
+                raise RuntimeError(
+                    f"No matching device ids {devices} for backend {backend}.")
 
         # Split viewport into stripes
         parts = len(devs)
         subs = self._split_viewport_stripes(vp, parts, axis=split_axis)
 
         # Dispatch per-device (prefer backend async if available)
-        results: List[np.ndarray] = [] * len(subs)
+        results: List[Optional[np.ndarray]] = [None] * len(subs)
         t0 = time.perf_counter()
 
         with ThreadPoolExecutor(max_workers=len(subs)) as ex:
@@ -416,24 +532,35 @@ class BackendManager:
                 name, dev = di.backend, di.device_id
                 b = self._get_backend(name, dev)
                 if hasattr(b, "render_async"):
-                    def submit_async(idx: int, backend_obj: Backend, subvp: Viewport):
-                        res, evt = backend_obj.render_async(fractal, subvp, settings)
-                        wait_fn = getattr(evt, "wait", getattr(evt, "synchronize", lambda: None))
+                    def submit_async(idx: int, backend_obj: Backend,
+                                     subvp: Viewport):
+                        res, evt = backend_obj.render_async(fractal, subvp,
+                                                            settings)
+                        wait_fn = getattr(evt, "wait",
+                                          getattr(evt, "synchronize",
+                                                  lambda: None))
                         wait_fn()
                         return idx, res
+
                     futs.append(ex.submit(submit_async, i, b, svp))
                 else:
-                    def submit_sync(idx: int, backend_obj: Backend, subvp: Viewport):
+                    def submit_sync(idx: int, backend_obj: Backend,
+                                    subvp: Viewport):
                         res = backend_obj.render(fractal, subvp, settings)
                         return idx, res
+
                     futs.append(ex.submit(submit_sync, i, b, svp))
 
             for fut in as_completed(futs):
                 idx, res = fut.result()
                 results[idx] = res
 
+        if any(r is None for r in results):
+            raise RuntimeError("[BackendManager] render_multi failed to obtain all parts.")
+
         elapsed = (time.perf_counter() - t0) * 1000.0
-        self.log(f"[BackendManager] render_multi across {len(subs)} parts on {backend} in {elapsed:.2f} ms")
+        self.log(
+            f"[BackendManager] render_multi across {len(subs)} parts on {backend} in {elapsed:.2f} ms")
 
         # Assemble strips
         canvas = np.zeros((vp.height, vp.width), dtype=settings.precision)
@@ -468,9 +595,11 @@ class BackendManager:
         if backend is None:
             chosen = self.choose_device()
             backend = chosen.backend
-            devs = [d for d in self._devices if d.backend.upper() == backend.upper()]
+            devs = [d for d in self._devices if
+                    d.backend.upper() == backend.upper()]
         else:
-            devs = [d for d in self._devices if d.backend.upper() == backend.upper()]
+            devs = [d for d in self._devices if
+                    d.backend.upper() == backend.upper()]
 
         if not devs:
             raise RuntimeError(f"No devices found for backend {backend}.")
@@ -478,7 +607,8 @@ class BackendManager:
         if devices is not None:
             devs = [d for d in devs if d.device_id in set(devices)]
             if not devs:
-                raise RuntimeError(f"No matching device ids {devices} for backend {backend}.")
+                raise RuntimeError(
+                    f"No matching device ids {devices} for backend {backend}.")
 
         parts = len(devs)
         subs = self._split_viewport_stripes(vp, parts, axis=split_axis)
@@ -489,7 +619,8 @@ class BackendManager:
             b = self._get_backend(name, dev)
             if hasattr(b, "render_async"):
                 res, evt = b.render_async(fractal, svp, settings)
-                wait_fn = getattr(evt, "wait", getattr(evt, "synchronize", lambda: None))
+                wait_fn = getattr(evt, "wait",
+                                  getattr(evt, "synchronize", lambda: None))
                 handles.append(RenderHandle(res, wait_fn))
             else:
                 # Wrap a sync call as an already-complete handle

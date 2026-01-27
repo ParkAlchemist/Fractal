@@ -1,10 +1,17 @@
 import numpy as np
 import pyopencl as cl
+import logging
 from typing import Dict, Any, Optional, Tuple, List
 
 from utils.backend_helpers import clear_cache_lock
 from fractals.base import Fractal, Viewport, RenderSettings, ProgramSpec, KernelStep, ArgSpec
+from fractals.spec_validator import validate_program_spec
 from backend.model.be_base import Backend
+from utils.shape_helper import eval_shape_expr, ShapeExprError
+
+
+logger = logging.getLogger(__name__)
+
 
 class OpenClBackend(Backend):
     """
@@ -66,30 +73,6 @@ class OpenClBackend(Backend):
 
         self.local_size = (8, 8)
 
-    @staticmethod
-    def enumerate_devices() -> List[dict]:
-        devs: list[dict] = []
-        ordinal = 0
-        for p in cl.get_platforms():
-            for d in p.get_devices():
-                name = d.name.strip()
-                vendor = d.vendor.strip()
-                driver = getattr(d, "driver_version", None)
-                cl_ver = getattr(p, "version", None)
-                total_mb = int(getattr(d, "global_mem_size", 0) // (1024 ** 2))
-                devs.append({
-                    "device_id": ordinal,
-                    "name": name,
-                    "vendor": vendor,
-                    "driver": driver,
-                    "compute_capability": cl_ver,
-                    "memory_total_mb": total_mb,
-                    "memory_free_mb": None,
-                    "is_available": True
-                })
-                ordinal += 1
-        return devs
-
     def _get_queue(self) -> cl.CommandQueue:
         if not self.queues:
             raise RuntimeError("Backend has been closed or not initialized")
@@ -110,15 +93,19 @@ class OpenClBackend(Backend):
             - a dict {"src": <str>, "kernel_name": <str>"}
             - a plain kernel source string (kernel name taken from step.name)
         """
-        self.program_spec = fractal.get_program_spec(settings, self.name)
+        spec = fractal.get_program_spec(settings, self.name)
+        validate_program_spec(spec, backend_hint=self.name)
+        self.program_spec = spec
         self._precision_cast = self.program_spec.precision
         self._fractal = fractal
         self._kernels.clear()
 
         # Build one cl.Program for each distinct source in steps
         for step in self.program_spec.steps:
-            src, kname = self._extract_opencl_source_and_name(step)
-            program = cl.Program(self.ctx, src).build()
+            src = step.func.get("src")
+            kname = step.func.get("kernel_name", step.name)
+            opts = step.func.get("build_options", [])
+            program = cl.Program(self.ctx, src).build(options=opts)
             kernel = cl.Kernel(program, kname)
             self._kernels[step.name] = kernel
 
@@ -162,7 +149,8 @@ class OpenClBackend(Backend):
         step = self.program_spec.steps[0]
         kernel = self._kernels[step.name]
 
-        arg_map, out_dev, _ = self._prepare_arg_map(self.program_spec.args, scalars, vp, st)
+        q = self._get_queue()
+        arg_map, out_dev, _ = self._prepare_arg_map(self.program_spec.args, scalars, vp, st, queue=q)
 
         self._bind_kernel_args(kernel, step.args, arg_map)
 
@@ -193,7 +181,7 @@ class OpenClBackend(Backend):
 
         scalars = fractal.build_arg_values(vp, settings)
 
-        arg_map, out_dev, out_host = self._prepare_arg_map(self.program_spec.args, scalars, vp, settings)
+        arg_map, out_dev, out_host = self._prepare_arg_map(self.program_spec.args, scalars, vp, settings, queue=q)
 
         last_read_evt: Optional[cl.Event] = None
 
@@ -229,43 +217,81 @@ class OpenClBackend(Backend):
             args_spec: Dict[str, ArgSpec],
             scalars: Dict[str, Any],
             vp: Viewport,
-            st: RenderSettings
+            st: RenderSettings,
+            queue: Optional[cl.CommandQueue] = None
     ) -> Tuple[Dict[str, Any], Optional[cl.Buffer], Optional[np.ndarray]]:
         """
-        From ArgSpecs + scalar values, build a dict name->value for binding.
-        Allocates device output buffers; returns (arg_map, out_dev, out_host).
+        Build a dict name->value for binding. Allocates device buffers for buffer_out,
+        uploads buffer_in from host if provided.
         """
         H, W = int(vp.height), int(vp.width)
         arg_map: Dict[str, Any] = {}
         out_dev: Optional[cl.Buffer] = None
         out_host: Optional[np.ndarray] = None
 
+        S = int(scalars.get("ssaa", 1))
+        base_vars = {
+            "H": H, "W": W, "width": W, "height": H,
+            "S": S,
+            "C": int(scalars.get("channels", 1)),
+            "N": int(scalars.get("N", scalars.get("palette_ex_len",scalars.get("palette_len",0)))),
+            "M": int(scalars.get("M", scalars.get("palette_in_len",scalars.get("palette_len",0)))),
+        }
+
         for name, spec in args_spec.items():
             if spec.role == "buffer_out":
                 np_dt = self._np_dtype_of(spec.dtype)
-                nbytes = H * W * np_dt.itemsize
+                shape = (H, W)
+                if spec.shape_expr:
+                    try:
+                        shape = eval_shape_expr(spec.shape_expr, base_vars)
+                    except ShapeExprError as e:
+                        raise KeyError(f"Failed to allocate '{name}': {e}")
+                nbytes = int(np.prod(shape)) * np_dt.itemsize
                 buf = cl.Buffer(self.ctx, cl.mem_flags.WRITE_ONLY, nbytes)
                 arg_map[name] = buf
-
                 if name == getattr(self.program_spec, "output_arg", name):
                     out_dev = buf
-                    out_host = np.empty((H, W), dtype=np_dt)
+                    out_host = np.empty(shape, dtype=np_dt)
+
             elif spec.role == "buffer_in":
-                raise NotImplementedError("buffer_in not yet supported")
-            elif spec.role == "scalar":
-                if name in scalars:
-                    val = scalars[name]
-                else:
+                if name not in scalars:
                     raise KeyError(
-                            f"Missing scalar value for '{name}' – "
-                            f"ensure fractal.build_arg_values() provides it."
-                    )
+                        f"buffer_in '{name}' not provided in scalars.")
+                host = np.asarray(scalars[name])
                 np_dt = self._np_dtype_of(spec.dtype)
+                if spec.shape_expr:
+                    try:
+                        exp_shape = eval_shape_expr(spec.shape_expr, base_vars)
+                        if tuple(host.shape) != tuple(exp_shape):
+                            raise ValueError(
+                                f"'{name}' expected shape {exp_shape}, got {host.shape}.")
+                    except ShapeExprError:
+                        pass
+                if host.dtype != np_dt:
+                    host = host.astype(np_dt, copy=False)
+                nbytes = host.size * np_dt.itemsize
+                buf = cl.Buffer(self.ctx, cl.mem_flags.READ_ONLY, nbytes)
+                if queue is None:
+                    raise RuntimeError(
+                        "OpenCL queue required to upload buffer_in.")
+                cl.enqueue_copy(queue, buf, host, is_blocking=True)
+                arg_map[name] = buf
+
+            elif spec.role == "scalar":
+                val = scalars.get(name, None)
+                np_dt = self._np_dtype_of(spec.dtype)
+                if val is None:
+                    raise KeyError(
+                        f"Missing scalar value for '{name}' – "
+                        f"ensure fractal.build_arg_values() provides it."
+                    )
                 if np.issubdtype(np_dt, np.integer):
                     val = np_dt.type(int(val))
                 else:
                     val = np_dt.type(float(val))
                 arg_map[name] = val
+
             else:
                 raise ValueError(f"Unsupported arg role {spec.role}")
 
@@ -298,13 +324,27 @@ class OpenClBackend(Backend):
                 try:
                     q.finish()
                 except Exception as e:
-                    print(f"Error in closing queue: {e}")
-                    pass
+                    logger.exception("Error finishing OpenCL queue during close: %s", e)
             self.queues.clear()
-        self.queues = []
+        else:
+            self.queues = []
+
         self._kernels.clear()
         self.program_spec = None
         self._fractal = None
+
+        try:
+            if getattr(self, "ctx", None) is not None:
+                try:
+                    release = getattr(self.ctx, "release", None)
+                    if callable(release):
+                        release()
+                except Exception as e:
+                    logger.exception("Error releasing OpenCL context during close: %s", e)
+                finally:
+                    self.ctx = None
+        except Exception as e:
+            logger.exception("Error during OpenCL backend close: %s", e)
 
 if __name__ == "__main__":
     with OpenClBackend() as be:

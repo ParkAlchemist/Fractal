@@ -1,7 +1,8 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Dict, Any, Optional, List, Literal
 import numpy as np
 from abc import ABC, abstractmethod
+
 
 @dataclass
 class Viewport:
@@ -17,6 +18,33 @@ class Viewport:
     width: int
     height: int
 
+
+@dataclass(frozen=True)
+class OperationConfig:
+    """
+    Configuration for a specific operation in the fractal rendering process.
+    Enabled indicates whether the operation is active.
+    Parameters holds any additional settings required for the operation.
+    """
+    name: str
+    enabled: bool = True
+    parameters: Dict[str, Any] = field(default_factory=dict)
+    fractal: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class LODPass:
+    """
+    Level of Detail (LOD) pass configuration.
+    Each pass has a name and scaling factors for resolution, maximum iterations,
+    and samples.
+    """
+    name: str
+    resolution_scale: float = 1.0
+    max_iter_scale: float = 1.0
+    samples_scale: float = 1.0
+
+
 @dataclass
 class RenderSettings:
     """
@@ -28,9 +56,15 @@ class RenderSettings:
     """
     max_iter: int
     samples: int = 1
-    precision: np.dtype = np.float64
-    base_res: str = None
-    target_res: str = None
+    precision: np.dtype = np.float32
+
+    operations: List[OperationConfig] = field(default_factory=lambda:[
+        OperationConfig("iter"),
+        OperationConfig("smooth"),
+        OperationConfig("normalize")
+    ])
+    lods: List[LODPass] = field(default_factory=lambda:[LODPass("full")])
+    backend: Optional[str] = None
 
 
 # --------------- Program-spec primitives ----------------------
@@ -38,13 +72,14 @@ class RenderSettings:
 ArgRole = Literal["scalar", "buffer_out", "buffer_in"]
 ArgSource = Literal["viewport", "settings", "constant", "runtime"]
 
+
 @dataclass(frozen=True)
 class ArgSpec:
     """
     Describes a kernel argument.
     - role: semantic role
     - dtype: dtype to cast to
-    - shape_expr: textual expression for shapes (e.g. "H,W") for buffers
+    - shape_expr: textual expression for shapes (e.g. "H, W") for buffers
     - source: where the value comes from (viewport, settings, constant, runtime)
     """
     name: str
@@ -52,6 +87,7 @@ class ArgSpec:
     dtype: Any
     shape_expr: Optional[str] = None
     source: ArgSource = "runtime"
+
 
 @dataclass(frozen=True)
 class KernelStep:
@@ -65,6 +101,7 @@ class KernelStep:
     func: Any
     args: List[str]
     meta: Optional[Dict[str, Any]]
+
 
 @dataclass(frozen=True)
 class ProgramSpec:
@@ -82,6 +119,7 @@ class ProgramSpec:
     steps: List[KernelStep]
     output_arg: str
 
+
 class Fractal(ABC):
     """
     An abstract base class for fractal types.
@@ -89,11 +127,13 @@ class Fractal(ABC):
     name: str
 
     @abstractmethod
-    def build_arg_values(self, vp: Viewport, st: RenderSettings) -> Dict[str, Any]:
+    def build_arg_values(self, vp: Viewport, st: RenderSettings) -> Dict[
+        str, Any]:
         ...
 
     @abstractmethod
-    def get_program_spec(self, st: RenderSettings, backend_name: str) -> ProgramSpec:
+    def get_program_spec(self, st: RenderSettings,
+                         backend_name: str) -> ProgramSpec:
         ...
 
     @abstractmethod

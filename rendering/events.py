@@ -23,4 +23,4 @@ class TileEvent:
 @dataclass(frozen=True)
 class LogEvent:
     message: str
-    level: Optional[int]
+    level: Optional[str]
